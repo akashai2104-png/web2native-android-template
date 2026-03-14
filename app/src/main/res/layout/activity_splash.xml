@@ -15,7 +15,6 @@
         android:gravity="center"
         android:paddingHorizontal="32dp">
 
-        <!-- App icon -->
         <ImageView
             android:id="@+id/splashIcon"
             android:layout_width="160dp"
@@ -25,7 +24,6 @@
             android:layout_marginBottom="28dp"
             android:adjustViewBounds="true" />
 
-        <!-- Splash text -->
         <TextView
             android:id="@+id/splashText"
             android:layout_width="wrap_content"
@@ -38,7 +36,6 @@
 
     </LinearLayout>
 
-    <!-- Dots loader -->
     <LinearLayout
         android:id="@+id/splashDots"
         android:layout_width="wrap_content"
@@ -69,7 +66,6 @@
             android:layout_marginHorizontal="4dp" />
     </LinearLayout>
 
-    <!-- Circular loading indicator -->
     <ProgressBar
         android:id="@+id/splashProgress"
         style="?android:attr/progressBarStyle"
@@ -81,7 +77,6 @@
         android:indeterminate="true"
         android:visibility="gone" />
 
-    <!-- Horizontal progress bar -->
     <ProgressBar
         android:id="@+id/splashProgressBar"
         style="?android:attr/progressBarStyleHorizontal"
@@ -92,5 +87,4 @@
         android:layout_marginBottom="48dp"
         android:indeterminate="true"
         android:visibility="gone" />
-
 </RelativeLayout>
