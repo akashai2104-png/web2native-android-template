@@ -1,0 +1,164 @@
+workflows:
+  android-build:
+    name: Android Build
+    max_build_duration: 15
+    
+    environment:
+      groups:
+        - web2native
+      java: 17
+      vars:
+        CM_APP_NAME: "WebView App"
+        CM_APP_ID: "com.web2native.app"
+        CM_WEBSITE_URL: "https://example.com"
+        CM_SPLASH_TEXT: "Loading..."
+        CM_THEME_COLOR: "#1D4ED8"
+        CM_SHOW_APP_BAR: "true"
+        CM_BUILD_FORMAT: "both"
+        CM_PUSH_ENABLED: "false"
+        GRADLE_OPTS: "-Dorg.gradle.daemon=true -Dorg.gradle.parallel=true -Dorg.gradle.caching=true -Dorg.gradle.configureondemand=true -Xmx3g"
+
+    cache:
+      cache_paths:
+        - $HOME/.gradle/caches
+        - $HOME/.gradle/wrapper
+
+    scripts:
+      - name: Apply theme color
+        script: |
+          THEME="${CM_THEME_COLOR:-#1D4ED8}"
+          cat > app/src/main/res/values/colors.xml << EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="primary">$THEME</color>
+              <color name="primary_dark">$THEME</color>
+              <color name="accent">$THEME</color>
+              <color name="splash_bg">#FFFFFF</color>
+              <color name="splash_text">#1E293B</color>
+          </resources>
+          EOF
+
+      - name: Set up app icon
+        script: |
+          ICON_URL="${CM_ICON_URL:-}"
+          case "$ICON_URL" in
+            http://*|https://*)
+              echo "Custom icon URL detected. Processing icon..."
+              ;;
+            *)
+              echo "No valid icon URL provided. Skipping icon step."
+              exit 0
+              ;;
+          esac
+
+          if ! curl -fsSL -o /tmp/icon_original.png "$ICON_URL"; then
+            echo "Icon download failed. Skipping custom icon override."
+            exit 0
+          fi
+
+          if ! file /tmp/icon_original.png | grep -qi "PNG image data"; then
+            echo "Downloaded icon is not a valid PNG. Skipping custom icon override."
+            exit 0
+          fi
+
+          which convert > /dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq imagemagick > /dev/null 2>&1)
+
+          # Resize for each density
+          for pair in "mdpi:48:108" "hdpi:72:162" "xhdpi:96:216" "xxhdpi:144:324" "xxxhdpi:192:432"; do
+            density=$(echo "$pair" | cut -d: -f1)
+            size=$(echo "$pair" | cut -d: -f2)
+            fg=$(echo "$pair" | cut -d: -f3)
+            mkdir -p app/src/main/res/mipmap-$density
+            convert /tmp/icon_original.png -resize ${size}x${size} app/src/main/res/mipmap-$density/ic_launcher.png || true
+            cp app/src/main/res/mipmap-$density/ic_launcher.png app/src/main/res/mipmap-$density/ic_launcher_round.png || true
+            convert /tmp/icon_original.png -resize ${fg}x${fg} -gravity center -background none -extent ${fg}x${fg} app/src/main/res/mipmap-$density/ic_launcher_foreground.png || true
+          done
+
+          cat > app/src/main/res/values/ic_launcher_background.xml << BGEOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="ic_launcher_background">#FFFFFF</color>
+          </resources>
+          BGEOF
+
+      - name: Set up signing keystore
+        script: |
+          KEYSTORE_PATH="$CM_BUILD_DIR/keystore.jks"
+          KEYSTORE_PASSWORD="${CM_KEYSTORE_PASSWORD:-android}"
+          KEY_ALIAS="${CM_KEY_ALIAS:-upload}"
+          KEY_PASSWORD="${CM_KEY_PASSWORD:-android}"
+
+          if [ -n "$CM_KEYSTORE_BASE64" ]; then
+            echo "$CM_KEYSTORE_BASE64" | base64 -d > "$KEYSTORE_PATH"
+          elif [ ! -f "$KEYSTORE_PATH" ]; then
+            keytool -genkeypair -v \
+              -keystore "$KEYSTORE_PATH" -alias "$KEY_ALIAS" \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$KEYSTORE_PASSWORD" -keypass "$KEY_PASSWORD" \
+              -dname "CN=Web2Native, OU=Apps, O=Web2Native, L=Internet, ST=Cloud, C=US"
+            echo "KEYSTORE_B64_OUTPUT_START"
+            base64 -w 0 "$KEYSTORE_PATH"
+            echo ""
+            echo "KEYSTORE_B64_OUTPUT_END"
+          fi
+
+          cat > signing.properties << EOF
+          storeFile=$KEYSTORE_PATH
+          storePassword=$KEYSTORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+
+      - name: Normalize AdMob config
+        script: |
+          ADMOB_ID="${CM_ADMOB_APP_ID:-}"
+          if [ -z "$ADMOB_ID" ]; then
+            echo "AdMob disabled for this build. Keeping SDK intact and skipping runtime initialization."
+          else
+            echo "AdMob enabled for this build."
+          fi
+
+      - name: Build Android artifacts
+        script: |
+          set -euo pipefail
+
+          # Use pinned standalone Gradle to avoid wrapper/JAR drift or stale cache issues.
+          GRADLE_VERSION="8.9"
+          GRADLE_DIR="/tmp/gradle-${GRADLE_VERSION}"
+          GRADLE_BIN="${GRADLE_DIR}/bin/gradle"
+
+          if [ ! -x "$GRADLE_BIN" ]; then
+            echo "Installing Gradle ${GRADLE_VERSION}..."
+            which unzip > /dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq unzip > /dev/null 2>&1)
+            curl -fsSL -o /tmp/gradle-${GRADLE_VERSION}-bin.zip "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
+            rm -rf "$GRADLE_DIR"
+            unzip -q /tmp/gradle-${GRADLE_VERSION}-bin.zip -d /tmp
+          fi
+
+          echo "Java version:" && java -version
+          echo "Gradle version:" && "$GRADLE_BIN" --version
+
+          FORMAT="${CM_BUILD_FORMAT:-both}"
+          case "$FORMAT" in
+            apk)
+              echo "Building APK only..."
+              "$GRADLE_BIN" --no-daemon --build-cache --stacktrace --info assembleRelease
+              ;;
+            aab)
+              echo "Building AAB only..."
+              "$GRADLE_BIN" --no-daemon --build-cache --stacktrace --info bundleRelease
+              ;;
+            *)
+              echo "Building APK + AAB..."
+              "$GRADLE_BIN" --no-daemon --build-cache --stacktrace --info assembleRelease bundleRelease
+              ;;
+          esac
+
+    artifacts:
+      - app/build/outputs/**/*.apk
+      - app/build/outputs/**/*.aab
+
+    publishing:
+      email:
+        recipients:
+          - user@example.com

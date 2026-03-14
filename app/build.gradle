@@ -1,0 +1,151 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+// These values are replaced dynamically by Codemagic via environment variables
+def appName = System.getenv("CM_APP_NAME") ?: "WebView App"
+def appId = System.getenv("CM_APP_ID") ?: "com.web2native.app"
+def websiteUrl = System.getenv("CM_WEBSITE_URL") ?: "https://example.com"
+def splashText = System.getenv("CM_SPLASH_TEXT") ?: ""
+def splashAnimation = System.getenv("CM_SPLASH_ANIMATION") ?: "grow"
+def themeColor = System.getenv("CM_THEME_COLOR") ?: "#1D4ED8"
+def cmShowAppBar = System.getenv("CM_SHOW_APP_BAR")
+def cmFullScreen = System.getenv("CM_FULL_SCREEN")
+def cmPushEnabled = System.getenv("CM_PUSH_ENABLED")
+
+if (cmShowAppBar == null) throw new GradleException("CM_SHOW_APP_BAR is required")
+if (cmFullScreen == null) throw new GradleException("CM_FULL_SCREEN is required")
+if (cmPushEnabled == null) throw new GradleException("CM_PUSH_ENABLED is required")
+
+def showAppBar = cmShowAppBar
+def orientation = System.getenv("CM_ORIENTATION") ?: "auto"
+def fullScreen = cmFullScreen
+def pushEnabled = cmPushEnabled
+def versionCodeEnv = System.getenv("CM_VERSION_CODE") ?: "1"
+def versionNameEnv = System.getenv("CM_VERSION_NAME") ?: "1.0"
+def admobAppId = System.getenv("CM_ADMOB_APP_ID") ?: ""
+def admobBannerId = System.getenv("CM_ADMOB_BANNER_ID") ?: ""
+def admobInterstitialId = System.getenv("CM_ADMOB_INTERSTITIAL_ID") ?: ""
+def apiBaseUrl = System.getenv("CM_API_BASE_URL") ?: ""
+def pushProjectId = System.getenv("CM_PUSH_PROJECT_ID") ?: ""
+def supabaseAnonKey = System.getenv("CM_SUPABASE_ANON_KEY") ?: ""
+def splashColor = System.getenv("CM_SPLASH_COLOR") ?: ""
+def splashDesign = System.getenv("CM_SPLASH_DESIGN") ?: "dots"
+def safeAdmobAppId = admobAppId?.trim() ? admobAppId : "ca-app-pub-3940256099942544~3347511713"
+
+// Extract host from website URL for deep linking
+def websiteHost = ""
+try {
+    websiteHost = new URI(websiteUrl).host ?: ""
+} catch (Exception e) {
+    websiteHost = ""
+}
+
+// Load signing properties if available
+def signingPropsFile = rootProject.file("signing.properties")
+def signingProps = new Properties()
+if (signingPropsFile.exists()) {
+    signingProps.load(new FileInputStream(signingPropsFile))
+}
+
+// Debug: Print all CM_* env vars received by Gradle
+println("=== GRADLE BUILD CONFIG DEBUG ===")
+println("CM_SHOW_APP_BAR=" + System.getenv("CM_SHOW_APP_BAR"))
+println("CM_FULL_SCREEN=" + System.getenv("CM_FULL_SCREEN"))
+println("CM_PUSH_ENABLED=" + System.getenv("CM_PUSH_ENABLED"))
+println("CM_SPLASH_TEXT=" + System.getenv("CM_SPLASH_TEXT"))
+println("CM_SPLASH_ANIMATION=" + System.getenv("CM_SPLASH_ANIMATION"))
+println("CM_SPLASH_COLOR=" + System.getenv("CM_SPLASH_COLOR"))
+println("CM_SPLASH_DESIGN=" + System.getenv("CM_SPLASH_DESIGN"))
+println("CM_PUSH_PROJECT_ID=" + System.getenv("CM_PUSH_PROJECT_ID"))
+println("CM_API_BASE_URL length=" + (System.getenv("CM_API_BASE_URL") ?: "").length())
+println("CM_SUPABASE_ANON_KEY length=" + (System.getenv("CM_SUPABASE_ANON_KEY") ?: "").length())
+println("showAppBar resolved=" + showAppBar)
+println("orientation resolved=" + orientation)
+println("fullScreen resolved=" + fullScreen)
+println("pushEnabled resolved=" + pushEnabled)
+println("splashDesign resolved=" + splashDesign)
+println("pushProjectId resolved=" + pushProjectId)
+println("=== END GRADLE DEBUG ===")
+
+android {
+    namespace 'com.web2native.app'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId appId
+        minSdk 24
+        targetSdk 35
+        versionCode versionCodeEnv.toInteger()
+        versionName versionNameEnv
+
+        resValue "string", "app_name", appName
+        buildConfigField "String", "WEBSITE_URL", "\"${websiteUrl}\""
+        buildConfigField "String", "SPLASH_TEXT", "\"${splashText}\""
+        buildConfigField "String", "SPLASH_ANIMATION", "\"${splashAnimation}\""
+        buildConfigField "String", "SPLASH_COLOR", "\"${splashColor}\""
+        buildConfigField "String", "SPLASH_DESIGN", "\"${splashDesign}\""
+        buildConfigField "String", "THEME_COLOR", "\"${themeColor}\""
+        buildConfigField "boolean", "SHOW_APP_BAR", showAppBar
+        buildConfigField "String", "ORIENTATION", "\"${orientation}\""
+        buildConfigField "boolean", "FULL_SCREEN", fullScreen
+        buildConfigField "boolean", "PUSH_ENABLED", pushEnabled
+        buildConfigField "String", "ADMOB_APP_ID", "\"${admobAppId}\""
+        buildConfigField "String", "ADMOB_BANNER_ID", "\"${admobBannerId}\""
+        buildConfigField "String", "ADMOB_INTERSTITIAL_ID", "\"${admobInterstitialId}\""
+        buildConfigField "String", "API_BASE_URL", "\"${apiBaseUrl}\""
+        buildConfigField "String", "PROJECT_ID", "\"${pushProjectId}\""
+        buildConfigField "String", "SUPABASE_ANON_KEY", "\"${supabaseAnonKey}\""
+
+        // Deep linking host placeholder
+        manifestPlaceholders = [
+            WEBSITE_HOST: websiteHost,
+            ADMOB_APP_ID: safeAdmobAppId
+        ]
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    signingConfigs {
+        if (signingPropsFile.exists()) {
+            release {
+                storeFile file(signingProps['storeFile'])
+                storePassword signingProps['storePassword']
+                keyAlias signingProps['keyAlias']
+                keyPassword signingProps['keyPassword']
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (signingPropsFile.exists()) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = '1.8'
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.15.0'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.webkit:webkit:1.12.1'
+    implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
+    implementation 'com.google.android.material:material:1.12.0'
+    implementation 'com.google.android.gms:play-services-ads:23.6.0'
+    implementation 'androidx.browser:browser:1.8.0'
+}

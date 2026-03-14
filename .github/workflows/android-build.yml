@@ -1,0 +1,439 @@
+name: Android Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: 'App display name'
+        required: true
+        default: 'WebView App'
+      website_url:
+        description: 'Website URL to wrap'
+        required: true
+        default: 'https://example.com'
+      package_name:
+        description: 'Android package name'
+        required: true
+        default: 'com.web2native.app'
+      icon_url:
+        description: 'URL to app icon PNG'
+        required: false
+        default: ''
+      theme_color:
+        description: 'Theme color hex'
+        required: false
+        default: '#1D4ED8'
+      splash_text:
+        description: 'Splash screen text'
+        required: false
+        default: ''
+      splash_animation:
+        description: 'Splash animation style: grow, fade, slide-up, bounce'
+        required: false
+        default: 'grow'
+      build_format:
+        description: 'Build format: apk, aab, or both'
+        required: false
+        default: 'both'
+      config_json:
+        description: 'JSON config with show_app_bar, orientation, full_screen, push_enabled, firebase_config'
+        required: false
+        default: '{}'
+      version_name:
+        description: 'User-defined version name (e.g. 1.2.0)'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Parse config JSON
+        id: config
+        run: |
+          CONFIG='${{ inputs.config_json }}'
+          CONFIG="${CONFIG:-{}}"
+          if ! echo "$CONFIG" | jq -e . >/dev/null 2>&1; then
+            CANDIDATE="$(echo "$CONFIG" | sed -E 's/}[[:space:]]*$//')"
+            if echo "$CANDIDATE" | jq -e . >/dev/null 2>&1; then
+              CONFIG="$CANDIDATE"
+            else
+              echo "::error::Invalid config_json payload: $CONFIG"
+              exit 1
+            fi
+          fi
+          echo "=== RAW CONFIG_JSON ==="
+          echo "$CONFIG"
+          echo "=== PARSED VALUES ==="
+
+          # IMPORTANT: jq's // operator treats false as null, so we must use
+          # 'if .key == null then "default" else (.key | tostring) end' for booleans
+          SHOW_APP_BAR=$(echo "$CONFIG" | jq -r 'if .show_app_bar == null then "true" else (.show_app_bar | tostring) end')
+          ORIENTATION=$(echo "$CONFIG" | jq -r '.orientation // "auto"')
+          FULL_SCREEN=$(echo "$CONFIG" | jq -r 'if .full_screen == null then "false" else (.full_screen | tostring) end')
+          PUSH_ENABLED=$(echo "$CONFIG" | jq -r 'if .push_enabled == null then "false" else (.push_enabled | tostring) end')
+          PUSH_PROJECT_ID=$(echo "$CONFIG" | jq -r '.push_project_id // ""')
+          ADMOB_APP_ID=$(echo "$CONFIG" | jq -r '.admob_app_id // ""')
+          ADMOB_BANNER_ID=$(echo "$CONFIG" | jq -r '.admob_banner_id // ""')
+          ADMOB_INTERSTITIAL_ID=$(echo "$CONFIG" | jq -r '.admob_interstitial_id // ""')
+          SPLASH_COLOR=$(echo "$CONFIG" | jq -r '.splash_color // ""')
+          SPLASH_DESIGN=$(echo "$CONFIG" | jq -r '.splash_design // "dots"')
+          FIREBASE_APP_ID=$(echo "$CONFIG" | jq -r '.firebase_app_id // ""')
+
+          echo "SHOW_APP_BAR=$SHOW_APP_BAR"
+          echo "ORIENTATION=$ORIENTATION"
+          echo "FULL_SCREEN=$FULL_SCREEN"
+          echo "PUSH_ENABLED=$PUSH_ENABLED"
+          echo "PUSH_PROJECT_ID=$PUSH_PROJECT_ID"
+          echo "SPLASH_COLOR=$SPLASH_COLOR"
+          echo "SPLASH_DESIGN=$SPLASH_DESIGN"
+          echo "SPLASH_TEXT=${{ inputs.splash_text }}"
+          echo "SPLASH_ANIMATION=${{ inputs.splash_animation }}"
+          echo "FIREBASE_APP_ID=$FIREBASE_APP_ID"
+
+          echo "show_app_bar=$SHOW_APP_BAR" >> "$GITHUB_OUTPUT"
+          echo "orientation=$ORIENTATION" >> "$GITHUB_OUTPUT"
+          echo "full_screen=$FULL_SCREEN" >> "$GITHUB_OUTPUT"
+          echo "push_enabled=$PUSH_ENABLED" >> "$GITHUB_OUTPUT"
+          echo "push_project_id=$PUSH_PROJECT_ID" >> "$GITHUB_OUTPUT"
+          echo "admob_app_id=$ADMOB_APP_ID" >> "$GITHUB_OUTPUT"
+          echo "admob_banner_id=$ADMOB_BANNER_ID" >> "$GITHUB_OUTPUT"
+          echo "admob_interstitial_id=$ADMOB_INTERSTITIAL_ID" >> "$GITHUB_OUTPUT"
+          echo "splash_color=$SPLASH_COLOR" >> "$GITHUB_OUTPUT"
+          echo "splash_design=$SPLASH_DESIGN" >> "$GITHUB_OUTPUT"
+          echo "firebase_app_id=$FIREBASE_APP_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Derive version name
+        id: cfg
+        run: |
+          VC="${{ github.run_number }}"
+          VC="${VC:-1}"
+          CUSTOM_VN="${{ inputs.version_name }}"
+          if [ -n "$CUSTOM_VN" ]; then
+            VN="$CUSTOM_VN"
+          else
+            VN="1.$((VC - 1))"
+          fi
+          echo "version_code=$VC" >> "$GITHUB_OUTPUT"
+          echo "version_name=$VN" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Apply theme color
+        run: |
+          THEME="${{ inputs.theme_color }}"
+          THEME="${THEME:-#1D4ED8}"
+          cat > app/src/main/res/values/colors.xml << EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="primary">$THEME</color>
+              <color name="primary_dark">$THEME</color>
+              <color name="accent">$THEME</color>
+              <color name="splash_bg">#FFFFFF</color>
+              <color name="splash_text">#1E293B</color>
+          </resources>
+          EOF
+
+      - name: Set up app icon
+        run: |
+          ICON_URL="${{ inputs.icon_url }}"
+          case "$ICON_URL" in
+            http://*|https://*)
+              echo "Custom icon URL detected. Processing icon..."
+              ;;
+            *)
+              echo "No valid icon URL provided. Skipping icon step."
+              exit 0
+              ;;
+          esac
+
+          if ! curl -fsSL -o /tmp/icon_original.png "$ICON_URL"; then
+            echo "Icon download failed. Skipping custom icon override."
+            exit 0
+          fi
+
+          if ! file /tmp/icon_original.png | grep -qi "PNG image data"; then
+            echo "Downloaded icon is not a valid PNG. Skipping custom icon override."
+            exit 0
+          fi
+
+          sudo apt-get update -qq && sudo apt-get install -y -qq imagemagick > /dev/null 2>&1
+
+          for pair in "mdpi:48:108" "hdpi:72:162" "xhdpi:96:216" "xxhdpi:144:324" "xxxhdpi:192:432"; do
+            density=$(echo "$pair" | cut -d: -f1)
+            size=$(echo "$pair" | cut -d: -f2)
+            fg=$(echo "$pair" | cut -d: -f3)
+            mkdir -p app/src/main/res/mipmap-$density
+            convert /tmp/icon_original.png -resize ${size}x${size} app/src/main/res/mipmap-$density/ic_launcher.png || true
+            cp app/src/main/res/mipmap-$density/ic_launcher.png app/src/main/res/mipmap-$density/ic_launcher_round.png || true
+            convert /tmp/icon_original.png -resize ${fg}x${fg} -gravity center -background none -extent ${fg}x${fg} app/src/main/res/mipmap-$density/ic_launcher_foreground.png || true
+          done
+
+          mkdir -p app/src/main/res/mipmap-anydpi-v26
+          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml << XMLEOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/ic_launcher_background"/>
+              <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
+          </adaptive-icon>
+          XMLEOF
+          cp app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
+
+          cat > app/src/main/res/values/ic_launcher_background.xml << BGEOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="ic_launcher_background">#FFFFFF</color>
+          </resources>
+          BGEOF
+
+      - name: Configure Firebase / Push Notifications
+        if: steps.config.outputs.push_enabled == 'true'
+        run: |
+          FIREBASE_PROJECT_NUMBER='${{ secrets.FIREBASE_PROJECT_NUMBER }}'
+          FIREBASE_WEB_API_KEY='${{ secrets.FIREBASE_WEB_API_KEY }}'
+          APP_ID='${{ inputs.package_name }}'
+
+          if [ -z "$FIREBASE_PROJECT_NUMBER" ] || [ -z "$FIREBASE_WEB_API_KEY" ]; then
+            echo "::error::FIREBASE_PROJECT_NUMBER or FIREBASE_WEB_API_KEY secret is missing. Push-enabled builds require Firebase secrets."
+            exit 1
+          fi
+
+          echo "Enabling Firebase Cloud Messaging for $APP_ID..."
+
+          # Dynamically generate google-services.json for any package name
+          FIREBASE_APP_ID='${{ steps.config.outputs.firebase_app_id }}'
+          # Use real Firebase app ID if available, otherwise fallback
+          if [ -z "$FIREBASE_APP_ID" ]; then
+            FIREBASE_APP_ID="1:${FIREBASE_PROJECT_NUMBER}:android:placeholder"
+            echo "WARNING: No Firebase app ID provided, using placeholder. Push may not work."
+          fi
+          echo "Using Firebase App ID: $FIREBASE_APP_ID"
+          cat > app/google-services.json << GSEOF
+          {
+            "project_info": {
+              "project_number": "$FIREBASE_PROJECT_NUMBER",
+              "project_id": "web2native-push",
+              "storage_bucket": "web2native-push.firebasestorage.app"
+            },
+            "client": [
+              {
+                "client_info": {
+                  "mobilesdk_app_id": "$FIREBASE_APP_ID",
+                  "android_client_info": {
+                    "package_name": "$APP_ID"
+                  }
+                },
+                "api_key": [
+                  {
+                    "current_key": "$FIREBASE_WEB_API_KEY"
+                  }
+                ],
+                "services": {
+                  "appinvite_service": {
+                    "other_platform_oauth_client": []
+                  }
+                }
+              }
+            ],
+            "configuration_version": "1"
+          }
+          GSEOF
+                  "android_client_info": {
+                    "package_name": "$APP_ID"
+                  }
+                },
+                "api_key": [
+                  {
+                    "current_key": "$FIREBASE_WEB_API_KEY"
+                  }
+                ],
+                "services": {
+                  "appinvite_service": {
+                    "other_platform_oauth_client": []
+                  }
+                }
+              }
+            ],
+            "configuration_version": "1"
+          }
+          GSEOF
+
+          # Add Google Services plugin to top-level build.gradle
+          cat > build.gradle << 'BUILDEOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+              id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
+              id 'com.google.gms.google-services' version '4.4.2' apply false
+          }
+          BUILDEOF
+
+          # Add Firebase dependencies to app/build.gradle
+          sed -i "s/id 'org.jetbrains.kotlin.android'/id 'org.jetbrains.kotlin.android'\n    id 'com.google.gms.google-services'/" app/build.gradle
+
+          # Add Firebase BOM and FCM dependency
+          sed -i "/implementation 'com.google.android.material:material:/a\\    implementation platform('com.google.firebase:firebase-bom:33.7.0')\n    implementation 'com.google.firebase:firebase-messaging-ktx'" app/build.gradle
+
+          # Add FCM service to AndroidManifest.xml (before closing </application>)
+          sed -i '/<\/application>/i\
+          \        <service\
+                      android:name=".WebToNativeFirebaseService"\
+                      android:exported="false">\
+                      <intent-filter>\
+                          <action android:name="com.google.firebase.MESSAGING_EVENT" \/>\
+                      <\/intent-filter>\
+                  <\/service>' app/src/main/AndroidManifest.xml
+
+          # Add POST_NOTIFICATIONS permission for Android 13+
+          sed -i '/<uses-permission android:name="android.permission.CAMERA"/a\    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />' app/src/main/AndroidManifest.xml
+
+          echo "Firebase setup complete (dynamic config for $APP_ID)."
+
+      - name: Validate backend secrets for push registration
+        if: steps.config.outputs.push_enabled == 'true'
+        run: |
+          if [ -z "${{ secrets.SUPABASE_URL }}" ] || [ -z "${{ secrets.SUPABASE_ANON_KEY }}" ]; then
+            echo "::error::SUPABASE_URL or SUPABASE_ANON_KEY secret is missing. Push-enabled builds require backend secrets for token registration."
+            exit 1
+          fi
+
+      - name: Remove FCM service if push disabled
+        if: steps.config.outputs.push_enabled != 'true'
+        run: |
+          # Remove the FCM service file if push is not enabled
+          rm -f app/src/main/kotlin/com/web2native/app/WebToNativeFirebaseService.kt
+
+      - name: Normalize AdMob config
+        run: |
+          ADMOB_ID="${{ steps.config.outputs.admob_app_id }}"
+          if [ -z "$ADMOB_ID" ]; then
+            echo "AdMob disabled for this build. Keeping SDK intact and skipping runtime initialization."
+          else
+            echo "AdMob enabled for this build."
+          fi
+
+      - name: Set up signing keystore
+        run: |
+          KEYSTORE_PATH="${{ github.workspace }}/keystore.jks"
+          KEYSTORE_PASSWORD="android"
+          KEY_ALIAS="upload"
+          KEY_PASSWORD="android"
+
+          keytool -genkeypair -v \
+            -keystore "$KEYSTORE_PATH" -alias "$KEY_ALIAS" \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass "$KEYSTORE_PASSWORD" -keypass "$KEY_PASSWORD" \
+            -dname "CN=Web2Native, OU=Apps, O=Web2Native, L=Internet, ST=Cloud, C=US"
+
+          cat > signing.properties << EOF
+          storeFile=$KEYSTORE_PATH
+          storePassword=$KEYSTORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+
+      - name: Verify env vars before build
+        env:
+          CM_SHOW_APP_BAR: ${{ steps.config.outputs.show_app_bar }}
+          CM_FULL_SCREEN: ${{ steps.config.outputs.full_screen }}
+          CM_PUSH_ENABLED: ${{ steps.config.outputs.push_enabled }}
+          CM_SPLASH_DESIGN: ${{ steps.config.outputs.splash_design }}
+          CM_SPLASH_COLOR: ${{ steps.config.outputs.splash_color }}
+          CM_PUSH_PROJECT_ID: ${{ steps.config.outputs.push_project_id }}
+          CM_SPLASH_ANIMATION: ${{ inputs.splash_animation }}
+          CM_SPLASH_TEXT: ${{ inputs.splash_text }}
+        run: |
+          echo "=== ENV VARS PASSED TO GRADLE ==="
+          echo "CM_SHOW_APP_BAR=$CM_SHOW_APP_BAR"
+          echo "CM_FULL_SCREEN=$CM_FULL_SCREEN"
+          echo "CM_PUSH_ENABLED=$CM_PUSH_ENABLED"
+          echo "CM_SPLASH_DESIGN=$CM_SPLASH_DESIGN"
+          echo "CM_SPLASH_COLOR=$CM_SPLASH_COLOR"
+          echo "CM_SPLASH_ANIMATION=$CM_SPLASH_ANIMATION"
+          echo "CM_SPLASH_TEXT=$CM_SPLASH_TEXT"
+          echo "CM_PUSH_PROJECT_ID=$CM_PUSH_PROJECT_ID"
+
+      - name: Ensure Gradle wrapper executable
+        run: chmod +x ./gradlew
+
+      - name: Build Android artifacts
+        env:
+          CM_APP_NAME: ${{ inputs.app_name }}
+          CM_APP_ID: ${{ inputs.package_name }}
+          CM_WEBSITE_URL: ${{ inputs.website_url }}
+          CM_SPLASH_TEXT: ${{ inputs.splash_text }}
+          CM_SPLASH_ANIMATION: ${{ inputs.splash_animation }}
+          CM_SPLASH_COLOR: ${{ steps.config.outputs.splash_color }}
+          CM_SPLASH_DESIGN: ${{ steps.config.outputs.splash_design }}
+          CM_THEME_COLOR: ${{ inputs.theme_color }}
+          CM_SHOW_APP_BAR: ${{ steps.config.outputs.show_app_bar }}
+          CM_ORIENTATION: ${{ steps.config.outputs.orientation }}
+          CM_FULL_SCREEN: ${{ steps.config.outputs.full_screen }}
+          CM_PUSH_ENABLED: ${{ steps.config.outputs.push_enabled }}
+          CM_VERSION_CODE: ${{ steps.cfg.outputs.version_code }}
+          CM_VERSION_NAME: ${{ steps.cfg.outputs.version_name }}
+          CM_BUILD_FORMAT: ${{ inputs.build_format }}
+          CM_ADMOB_APP_ID: ${{ steps.config.outputs.admob_app_id }}
+          CM_ADMOB_BANNER_ID: ${{ steps.config.outputs.admob_banner_id }}
+          CM_ADMOB_INTERSTITIAL_ID: ${{ steps.config.outputs.admob_interstitial_id }}
+          CM_API_BASE_URL: ${{ secrets.SUPABASE_URL }}
+          CM_PUSH_PROJECT_ID: ${{ steps.config.outputs.push_project_id }}
+          CM_SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          set -euo pipefail
+          echo "=== GRADLE BUILD ENV VERIFICATION ==="
+          echo "CM_SHOW_APP_BAR=$CM_SHOW_APP_BAR"
+          echo "CM_FULL_SCREEN=$CM_FULL_SCREEN"
+          echo "CM_PUSH_ENABLED=$CM_PUSH_ENABLED"
+          echo "CM_SPLASH_DESIGN=$CM_SPLASH_DESIGN"
+          echo "CM_SPLASH_ANIMATION=$CM_SPLASH_ANIMATION"
+          echo "CM_SPLASH_TEXT=$CM_SPLASH_TEXT"
+          echo "CM_PUSH_PROJECT_ID length=${#CM_PUSH_PROJECT_ID}"
+          echo "CM_API_BASE_URL length=${#CM_API_BASE_URL}"
+          echo "CM_SUPABASE_ANON_KEY length=${#CM_SUPABASE_ANON_KEY}"
+          
+          FORMAT="${{ inputs.build_format }}"
+          FORMAT="${FORMAT:-both}"
+          case "$FORMAT" in
+            apk)
+              echo "Building APK only (forced clean, no cache)..."
+              gradle --no-daemon --no-build-cache --stacktrace clean assembleRelease
+              ;;
+            aab)
+              echo "Building AAB only (forced clean, no cache)..."
+              gradle --no-daemon --no-build-cache --stacktrace clean bundleRelease
+              ;;
+            *)
+              echo "Building APK + AAB (forced clean, no cache)..."
+              gradle --no-daemon --no-build-cache --stacktrace clean assembleRelease bundleRelease
+              ;;
+          esac
+
+      - name: Upload APK
+        if: ${{ inputs.build_format != 'aab' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apk
+          path: app/build/outputs/**/*.apk
+          retention-days: 90
+
+      - name: Upload AAB
+        if: ${{ inputs.build_format != 'apk' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-aab
+          path: app/build/outputs/**/*.aab
+          retention-days: 90
