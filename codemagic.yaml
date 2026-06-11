@@ -1,0 +1,408 @@
+workflows:
+  android-build:
+    name: Android Build
+    max_build_duration: 20
+    
+    environment:
+      groups:
+        - web2native
+      java: 17
+      vars:
+        CM_APP_NAME: "WebView App"
+        CM_APP_ID: "com.web2native.app"
+        CM_WEBSITE_URL: "https://example.com"
+        CM_SPLASH_TEXT: "Loading..."
+        CM_THEME_COLOR: "#1D4ED8"
+        CM_SHOW_APP_BAR: "true"
+        CM_BUILD_FORMAT: "both"
+        CM_PUSH_ENABLED: "false"
+        CM_ORIENTATION: "auto"
+        CM_FULL_SCREEN: "false"
+        CM_SPLASH_ANIMATION: "grow"
+        CM_SPLASH_DESIGN: "dots"
+        CM_VERSION_CODE: "1"
+        CM_VERSION_NAME: "1.0"
+        CM_KEYSTORE_PASSWORD: "android"
+        CM_KEY_ALIAS: "upload"
+        CM_KEY_PASSWORD: "android"
+        GRADLE_OPTS: "-Dorg.gradle.daemon=true -Dorg.gradle.parallel=true -Dorg.gradle.caching=true -Dorg.gradle.configureondemand=true -Xmx3g"
+
+    cache:
+      cache_paths:
+        - $HOME/.gradle/caches
+        - $HOME/.gradle/wrapper
+
+    scripts:
+      - name: Inject source-of-truth templates
+        script: |
+          #!/bin/bash
+          set -euo pipefail
+          
+          KOTLIN_DIR="app/src/main/kotlin/com/web2native/app"
+          RES_DIR="app/src/main/res"
+          mkdir -p "$KOTLIN_DIR" "$RES_DIR/layout" "$RES_DIR/xml" "$RES_DIR/values" "$RES_DIR/values-v31" "app/src/main/assets"
+          
+          inject() {
+            local VAR_NAME="$1" TARGET="$2"
+            local VAL="${!VAR_NAME:-}"
+            if [ -n "$VAL" ]; then
+              echo "$VAL" | base64 -d > "$TARGET"
+              echo "Injected $TARGET ($(wc -c < "$TARGET") bytes)"
+              return 0
+            else
+              echo "No $VAR_NAME — using repo version of $TARGET"
+              return 1
+            fi
+          }
+          
+          INJECTED=0
+          inject CM_MAIN_ACTIVITY_B64    "$KOTLIN_DIR/MainActivity.kt"        && INJECTED=$((INJECTED+1)) || true
+          inject CM_MANIFEST_B64         "app/src/main/AndroidManifest.xml"    && INJECTED=$((INJECTED+1)) || true
+          inject CM_SPLASH_ACTIVITY_B64  "$KOTLIN_DIR/SplashActivity.kt"      && INJECTED=$((INJECTED+1)) || true
+          inject CM_FIREBASE_SERVICE_B64 "$KOTLIN_DIR/WebToNativeFirebaseService.kt" && INJECTED=$((INJECTED+1)) || true
+          inject CM_PROGUARD_B64         "app/proguard-rules.pro"             && INJECTED=$((INJECTED+1)) || true
+          inject CM_LAYOUT_MAIN_B64      "$RES_DIR/layout/activity_main.xml"  && INJECTED=$((INJECTED+1)) || true
+          inject CM_LAYOUT_SPLASH_B64    "$RES_DIR/layout/activity_splash.xml" && INJECTED=$((INJECTED+1)) || true
+          inject CM_FILE_PATHS_B64       "$RES_DIR/xml/file_paths.xml"        && INJECTED=$((INJECTED+1)) || true
+          inject CM_THEMES_B64           "$RES_DIR/values/themes.xml"         && INJECTED=$((INJECTED+1)) || true
+          inject CM_THEMES_V31_B64       "$RES_DIR/values-v31/themes.xml"     && INJECTED=$((INJECTED+1)) || true
+          inject CM_OFFLINE_HTML_B64     "app/src/main/assets/offline.html"   && INJECTED=$((INJECTED+1)) || true
+          inject CM_APP_BUILD_GRADLE_B64 "app/build.gradle"                   && INJECTED=$((INJECTED+1)) || true
+          inject CM_ROOT_BUILD_GRADLE_B64 "build.gradle"                      && INJECTED=$((INJECTED+1)) || true
+          
+          echo "Template injection complete: $INJECTED files injected"
+
+      - name: Verify app/build.gradle exists
+        script: |
+          set -euo pipefail
+          test -f app/build.gradle
+          echo "app/build.gradle present"
+
+      - name: Configure strings and package
+        script: |
+          set -euo pipefail
+          python3 <<'PY'
+          import os
+          import re
+          from pathlib import Path
+          from xml.sax.saxutils import escape
+
+          app_name = escape(os.environ["CM_APP_NAME"])
+
+          strings_file = Path("app/src/main/res/values/strings.xml")
+          strings_file.parent.mkdir(parents=True, exist_ok=True)
+
+          if strings_file.exists():
+              text = strings_file.read_text(encoding="utf-8")
+              replacement = f'<string name="app_name">{app_name}</string>'
+              if '<string name="app_name">' in text:
+                  text = re.sub(r'<string name="app_name">.*?</string>', replacement, text, count=1, flags=re.S)
+              elif '</resources>' in text:
+                  text = text.replace('</resources>', f'    {replacement}\n</resources>')
+              else:
+                  text = f'<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    {replacement}\n</resources>\n'
+          else:
+              text = f'<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <string name="app_name">{app_name}</string>\n</resources>\n'
+
+          strings_file.write_text(text, encoding="utf-8")
+          print("Updated app_name string resource")
+          print("Keeping wrapper Kotlin namespace fixed at com.web2native.app")
+          PY
+
+      - name: Apply theme color
+        script: |
+          THEME="${CM_THEME_COLOR:-#1D4ED8}"
+          SPLASH_ENABLED="${CM_SPLASH_ENABLED:-true}"
+          SPLASH_DESIGN="${CM_SPLASH_DESIGN:-dots}"
+          SPLASH_COLOR="${CM_SPLASH_COLOR:-}"
+          if [ "$SPLASH_ENABLED" = "false" ] || [ "$SPLASH_DESIGN" = "none" ]; then
+            LAUNCH_BG="#FFFFFF"
+          elif [ -n "$SPLASH_COLOR" ]; then
+            LAUNCH_BG="$SPLASH_COLOR"
+          else
+            LAUNCH_BG="$THEME"
+          fi
+          cat > app/src/main/res/values/colors.xml << EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="primary">$THEME</color>
+              <color name="primary_dark">$THEME</color>
+              <color name="accent">$THEME</color>
+              <color name="launch_bg">$LAUNCH_BG</color>
+              <color name="splash_bg">$LAUNCH_BG</color>
+              <color name="splash_text">#1E293B</color>
+          </resources>
+          EOF
+
+      - name: Apply splash theme variant
+        script: |
+          SPLASH_ENABLED="${CM_SPLASH_ENABLED:-true}"
+          SPLASH_DESIGN="${CM_SPLASH_DESIGN:-dots}"
+          SPLASH_TEXT="${CM_SPLASH_TEXT:-}"
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/splashscreen_transparent_icon.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <size android:width="1dp" android:height="1dp" />
+              <solid android:color="@android:color/transparent" />
+          </shape>
+          EOF
+          if [ "$SPLASH_ENABLED" = "false" ] || { [ "$SPLASH_DESIGN" = "none" ] && [ -z "$SPLASH_TEXT" ]; }; then
+            echo "Splash disabled — removing SplashActivity launcher and launching MainActivity with NoSplash"
+            python3 - <<'PY'
+          import re
+          from pathlib import Path
+          manifest = Path("app/src/main/AndroidManifest.xml")
+          text = manifest.read_text()
+          text = re.sub(r'android:theme="@style/Theme\.WebViewApp(?:\.Splash)?"', 'android:theme="@style/Theme.WebViewApp.NoSplash"', text)
+          text = re.sub(r'\n\s*<activity\b[^>]*android:name="\.SplashActivity"[\s\S]*?</activity>\s*', '\n\n', text, count=1)
+          launcher_filter = '''            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>'''
+          if 'android.intent.category.LAUNCHER' not in text:
+              text, count = re.subn(
+                  r'(<activity\b[^>]*android:name="\.MainActivity"[\s\S]*?>)',
+                  lambda m: m.group(1) + "\n" + launcher_filter,
+                  text,
+                  count=1,
+              )
+              if count != 1:
+                  raise SystemExit("Unable to attach launcher intent to MainActivity")
+          if '.SplashActivity' in text or 'Theme.WebViewApp.Splash' in text:
+              raise SystemExit("SplashActivity still present in disabled-splash manifest")
+          if text.count('android.intent.category.LAUNCHER') != 1:
+              raise SystemExit("Disabled-splash manifest must contain exactly one launcher")
+          manifest.write_text(text)
+          PY
+          fi
+
+      - name: Set up app icon
+        script: |
+          ICON_URL="${CM_ICON_URL:-}"
+          ICON_BG_COLOR="${CM_THEME_COLOR:-#1D4ED8}"
+
+          which convert > /dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq imagemagick > /dev/null 2>&1)
+
+          generate_default_icon() {
+            echo "Generating professional default icon..."
+            convert -size 1024x1024 xc:none \
+              -fill "$ICON_BG_COLOR" -draw "roundrectangle 0,0 1023,1023 224,224" \
+              -fill none -stroke "#FFFFFF" -strokewidth 56 \
+              -draw "circle 512,512 782,512" \
+              -strokewidth 40 \
+              -draw "ellipse 512,512 150,270 0,360" \
+              -draw "ellipse 512,512 270,118 0,360" \
+              -strokewidth 28 \
+              -draw "ellipse 512,512 270,190 0,360" \
+              -strokewidth 40 \
+              -draw "line 242,512 782,512" \
+              /tmp/icon_legacy_base.png
+
+            convert -size 1024x1024 xc:none \
+              -fill none -stroke "#FFFFFF" -strokewidth 56 \
+              -draw "circle 512,512 782,512" \
+              -strokewidth 40 \
+              -draw "ellipse 512,512 150,270 0,360" \
+              -draw "ellipse 512,512 270,118 0,360" \
+              -strokewidth 28 \
+              -draw "ellipse 512,512 270,190 0,360" \
+              -strokewidth 40 \
+              -draw "line 242,512 782,512" \
+              /tmp/icon_foreground_base.png
+          }
+
+          if [ -n "$ICON_URL" ]; then
+            echo "Custom icon URL detected. Processing icon..."
+            if curl -fsSL -o /tmp/icon_source "$ICON_URL" && identify /tmp/icon_source > /dev/null 2>&1; then
+              convert /tmp/icon_source -auto-orient -background none -alpha set /tmp/icon_oriented.png
+              convert /tmp/icon_oriented.png -fuzz 10% -trim +repage /tmp/icon_trimmed.png
+              echo "Trimmed icon: $(identify -format '%wx%h' /tmp/icon_trimmed.png)"
+              SRC_W=$(identify -format "%w" /tmp/icon_trimmed.png)
+              SRC_H=$(identify -format "%h" /tmp/icon_trimmed.png)
+              MAX=$(( SRC_W > SRC_H ? SRC_W : SRC_H ))
+              convert /tmp/icon_trimmed.png -background none -gravity center -extent ${MAX}x${MAX} /tmp/icon_square.png
+              convert /tmp/icon_square.png -background white -alpha remove -alpha off -gravity center -resize 820x820 -extent 1024x1024 /tmp/icon_legacy_base.png
+              convert /tmp/icon_square.png -background none -gravity center -resize 680x680 -extent 1024x1024 /tmp/icon_foreground_base.png
+            else
+              echo "Icon download failed. Falling back to default icon."
+              generate_default_icon
+            fi
+          else
+            echo "No custom icon provided. Using default icon."
+            generate_default_icon
+          fi
+
+          for pair in "mdpi:48:108" "hdpi:72:162" "xhdpi:96:216" "xxhdpi:144:324" "xxxhdpi:192:432"; do
+            density=$(echo "$pair" | cut -d: -f1)
+            size=$(echo "$pair" | cut -d: -f2)
+            fg=$(echo "$pair" | cut -d: -f3)
+            mkdir -p app/src/main/res/mipmap-$density
+            convert /tmp/icon_legacy_base.png -resize ${size}x${size} -gravity center -background white -extent ${size}x${size} app/src/main/res/mipmap-$density/ic_launcher.png || true
+            HALF=$((size / 2))
+            convert /tmp/icon_legacy_base.png -resize ${size}x${size} -gravity center -background white -extent ${size}x${size} \
+              \( +clone -threshold -1 -negate -fill white -draw "circle ${HALF},${HALF} ${HALF},0" \) \
+              -alpha off -compose copy_opacity -composite \
+              app/src/main/res/mipmap-$density/ic_launcher_round.png || true
+            convert /tmp/icon_foreground_base.png -resize ${fg}x${fg} -gravity center -background none -extent ${fg}x${fg} app/src/main/res/mipmap-$density/ic_launcher_foreground.png || true
+          done
+
+          # Generate adaptive icon XML for Android 8+ (API 26+)
+          mkdir -p app/src/main/res/mipmap-anydpi-v26
+          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml << ADAPTEOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/ic_launcher_background"/>
+              <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
+          </adaptive-icon>
+          ADAPTEOF
+          cp app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
+
+          # Use theme color for adaptive icon background instead of white
+          cat > app/src/main/res/values/ic_launcher_background.xml << BGEOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="ic_launcher_background">${ICON_BG_COLOR}</color>
+          </resources>
+          BGEOF
+          echo "Adaptive icon configured with theme-colored background for all densities"
+
+      - name: Set up signing keystore
+        script: |
+          FREE_TIER="${CM_FREE_TIER:-false}"
+          if [ "$FREE_TIER" = "true" ]; then
+            echo "Free tier build — skipping release keystore (debug-signed only)"
+            exit 0
+          fi
+
+          KEYSTORE_PATH="$CM_BUILD_DIR/keystore.jks"
+          KEYSTORE_PASSWORD="${CM_KEYSTORE_PASSWORD:-android}"
+          KEY_ALIAS="${CM_KEY_ALIAS:-upload}"
+          KEY_PASSWORD="${CM_KEY_PASSWORD:-android}"
+
+          if [ -n "$CM_KEYSTORE_BASE64" ]; then
+            echo "$CM_KEYSTORE_BASE64" | base64 -d > "$KEYSTORE_PATH"
+          elif [ ! -f "$KEYSTORE_PATH" ]; then
+            keytool -genkeypair -v \
+              -keystore "$KEYSTORE_PATH" -alias "$KEY_ALIAS" \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$KEYSTORE_PASSWORD" -keypass "$KEY_PASSWORD" \
+              -dname "CN=Web2Native, OU=Apps, O=Web2Native, L=Internet, ST=Cloud, C=US"
+            echo "KEYSTORE_B64_OUTPUT_START"
+            base64 -w 0 "$KEYSTORE_PATH"
+            echo ""
+            echo "KEYSTORE_B64_OUTPUT_END"
+          fi
+
+          cat > signing.properties << EOF
+          storeFile=$KEYSTORE_PATH
+          storePassword=$KEYSTORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+
+      - name: Configure Firebase for push notifications
+        script: |
+          if [ "${CM_PUSH_ENABLED}" = "true" ] && [ -n "${CM_FIREBASE_PROJECT_NUMBER}" ] && [ -n "${CM_FIREBASE_WEB_API_KEY}" ]; then
+            echo "Generating google-services.json dynamically for package: ${CM_APP_ID}"
+            
+            FIREBASE_APP_ID="${CM_FIREBASE_APP_ID:-}"
+            if [ -z "$FIREBASE_APP_ID" ]; then
+              echo "Warning: CM_FIREBASE_APP_ID not set. Using placeholder."
+              FIREBASE_APP_ID="1:${CM_FIREBASE_PROJECT_NUMBER}:android:placeholder"
+            fi
+            
+            cat > app/google-services.json << GSEOF
+          {
+            "project_info": {
+              "project_number": "${CM_FIREBASE_PROJECT_NUMBER}",
+              "firebase_url": "",
+              "project_id": "web2native-push",
+              "storage_bucket": ""
+            },
+            "client": [
+              {
+                "client_info": {
+                  "mobilesdk_app_id": "${FIREBASE_APP_ID}",
+                  "android_client_info": {
+                    "package_name": "${CM_APP_ID}"
+                  }
+                },
+                "api_key": [
+                  {
+                    "current_key": "${CM_FIREBASE_WEB_API_KEY}"
+                  }
+                ]
+              }
+            ],
+            "configuration_version": "1"
+          }
+          GSEOF
+            echo "google-services.json generated"
+          else
+            echo "Push notifications disabled. Skipping Firebase config."
+          fi
+
+      - name: Normalize AdMob config
+        script: |
+          ADMOB_ID="${CM_ADMOB_APP_ID:-}"
+          if [ -z "$ADMOB_ID" ]; then
+            echo "AdMob disabled for this build."
+          else
+            echo "AdMob enabled for this build."
+          fi
+
+      - name: Build Android artifacts
+        script: |
+          set -euo pipefail
+
+          GRADLE_VERSION="8.11.1"
+          GRADLE_DIR="/tmp/gradle-${GRADLE_VERSION}"
+          GRADLE_BIN="${GRADLE_DIR}/bin/gradle"
+
+          if [ ! -x "$GRADLE_BIN" ]; then
+            echo "Installing Gradle ${GRADLE_VERSION}..."
+            which unzip > /dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq unzip > /dev/null 2>&1)
+            curl -fsSL -o "/tmp/gradle-${GRADLE_VERSION}-bin.zip" "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
+            rm -rf "$GRADLE_DIR"
+            unzip -q "/tmp/gradle-${GRADLE_VERSION}-bin.zip" -d /tmp
+          fi
+
+          echo "Java version:" && java -version
+          echo "Gradle version:" && "$GRADLE_BIN" --version
+
+          FREE_TIER="${CM_FREE_TIER:-false}"
+          FORMAT="${CM_BUILD_FORMAT:-both}"
+
+          if [ "$FREE_TIER" = "true" ]; then
+            echo "Free tier build — building debug APK only..."
+            "$GRADLE_BIN" --no-daemon --build-cache --stacktrace --info assembleDebug
+          else
+            case "$FORMAT" in
+              apk)
+                echo "Building APK only..."
+                "$GRADLE_BIN" --no-daemon --build-cache --stacktrace --info assembleRelease
+                ;;
+              aab)
+                echo "Building AAB only..."
+                "$GRADLE_BIN" --no-daemon --build-cache --stacktrace --info bundleRelease
+                ;;
+              *)
+                echo "Building APK + AAB..."
+                "$GRADLE_BIN" --no-daemon --build-cache --stacktrace --info assembleRelease bundleRelease
+                ;;
+            esac
+          fi
+
+    artifacts:
+      - app/build/outputs/**/*.apk
+      - app/build/outputs/**/*.aab
+      - /tmp/codemagic_logs/*.log
+
+    publishing:
+      email:
+        recipients:
+          - builds@web2native.dev
+        notify:
+          success: false
+          failure: false

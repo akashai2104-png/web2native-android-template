@@ -1,0 +1,866 @@
+# template-version: 2026-06-11-diagnostics-v2
+name: Android Build
+run-name: "Build ${{ github.event.client_payload.correlation_id || 'manual' }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: 'App display name'
+        required: true
+        default: 'WebView App'
+      website_url:
+        description: 'Website URL to wrap'
+        required: true
+        default: 'https://example.com'
+      package_name:
+        description: 'Android package name'
+        required: true
+        default: 'com.web2native.app'
+      theme_color:
+        description: 'Theme color hex'
+        required: false
+        default: '#1D4ED8'
+      build_format:
+        description: 'Build format: apk, aab, or both'
+        required: false
+        default: 'both'
+      config_json:
+        description: 'JSON config with all build options (splash, icon, orientation, push, admob, etc.)'
+        required: false
+        default: '{}'
+      version_name:
+        description: 'User-defined version name (e.g. 1.2.0)'
+        required: false
+        default: ''
+  repository_dispatch:
+    types: [build]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GRADLE_OPTS: "-Dorg.gradle.parallel=true -Dorg.gradle.caching=true -Xmx3g"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Normalize inputs (workflow_dispatch vs repository_dispatch)
+        id: inputs
+        run: |
+          # For repository_dispatch, inputs come from client_payload
+          # For workflow_dispatch, they come from inputs
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "app_name=${{ github.event.client_payload.app_name }}" >> "$GITHUB_OUTPUT"
+            echo "website_url=${{ github.event.client_payload.website_url }}" >> "$GITHUB_OUTPUT"
+            echo "package_name=${{ github.event.client_payload.package_name }}" >> "$GITHUB_OUTPUT"
+            echo "theme_color=${{ github.event.client_payload.theme_color }}" >> "$GITHUB_OUTPUT"
+            echo "build_format=${{ github.event.client_payload.build_format }}" >> "$GITHUB_OUTPUT"
+            echo "config_json<<CJEOF" >> "$GITHUB_OUTPUT"
+            echo '${{ github.event.client_payload.config_json }}' >> "$GITHUB_OUTPUT"
+            echo "CJEOF" >> "$GITHUB_OUTPUT"
+            echo "version_name=${{ github.event.client_payload.version_name }}" >> "$GITHUB_OUTPUT"
+            echo "version_code=${{ github.event.client_payload.version_code }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "app_name=${{ inputs.app_name }}" >> "$GITHUB_OUTPUT"
+            echo "website_url=${{ inputs.website_url }}" >> "$GITHUB_OUTPUT"
+            echo "package_name=${{ inputs.package_name }}" >> "$GITHUB_OUTPUT"
+            echo "theme_color=${{ inputs.theme_color }}" >> "$GITHUB_OUTPUT"
+            echo "build_format=${{ inputs.build_format }}" >> "$GITHUB_OUTPUT"
+            echo "config_json<<CJEOF" >> "$GITHUB_OUTPUT"
+            echo '${{ inputs.config_json }}' >> "$GITHUB_OUTPUT"
+            echo "CJEOF" >> "$GITHUB_OUTPUT"
+            echo "version_name=${{ inputs.version_name }}" >> "$GITHUB_OUTPUT"
+            echo "version_code=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Parse config JSON
+        id: config
+        run: |
+          CONFIG='${{ steps.inputs.outputs.config_json }}'
+          CONFIG="${CONFIG:-{}}"
+          if ! echo "$CONFIG" | jq -e . >/dev/null 2>&1; then
+            CANDIDATE="$(echo "$CONFIG" | sed -E 's/}[[:space:]]*$//')"
+            if echo "$CANDIDATE" | jq -e . >/dev/null 2>&1; then
+              CONFIG="$CANDIDATE"
+            else
+              echo "::error::Invalid config_json payload: $CONFIG"
+              exit 1
+            fi
+          fi
+          echo "=== RAW CONFIG_JSON ==="
+          echo "$CONFIG"
+          echo "=== PARSED VALUES ==="
+
+          # IMPORTANT: jq's // operator treats false as null, so we must use
+          # 'if .key == null then "default" else (.key | tostring) end' for booleans
+          SHOW_APP_BAR=$(echo "$CONFIG" | jq -r 'if .show_app_bar == null then "true" else (.show_app_bar | tostring) end')
+          ORIENTATION=$(echo "$CONFIG" | jq -r '.orientation // "auto"')
+          FULL_SCREEN=$(echo "$CONFIG" | jq -r 'if .full_screen == null then "false" else (.full_screen | tostring) end')
+          PUSH_ENABLED=$(echo "$CONFIG" | jq -r 'if .push_enabled == null then "false" else (.push_enabled | tostring) end')
+          PROJECT_ID=$(echo "$CONFIG" | jq -r '.project_id // .push_project_id // ""')
+          PUSH_PROJECT_ID=$(echo "$CONFIG" | jq -r '.push_project_id // ""')
+          ADMOB_APP_ID=$(echo "$CONFIG" | jq -r '.admob_app_id // ""')
+          ADMOB_BANNER_ID=$(echo "$CONFIG" | jq -r '.admob_banner_id // ""')
+          ADMOB_INTERSTITIAL_ID=$(echo "$CONFIG" | jq -r '.admob_interstitial_id // ""')
+          SPLASH_COLOR=$(echo "$CONFIG" | jq -r '.splash_color // ""')
+          SPLASH_DESIGN=$(echo "$CONFIG" | jq -r '.splash_design // "dots"')
+          SPLASH_TEXT=$(echo "$CONFIG" | jq -r '.splash_text // ""')
+          SPLASH_ANIMATION=$(echo "$CONFIG" | jq -r '.splash_animation // "grow"')
+          ICON_URL=$(echo "$CONFIG" | jq -r '.icon_url // ""')
+          FIREBASE_APP_ID=$(echo "$CONFIG" | jq -r '.firebase_app_id // ""')
+          GOOGLE_WEB_CLIENT_ID=$(echo "$CONFIG" | jq -r '.google_web_client_id // ""')
+          FREE_TIER=$(echo "$CONFIG" | jq -r 'if .free_tier == null then "false" else (.free_tier | tostring) end')
+          AUTO_INJECT_VIEWPORT=$(echo "$CONFIG" | jq -r 'if .auto_inject_viewport == null then "true" else (.auto_inject_viewport | tostring) end')
+          ADMOB_REWARDED_ID=$(echo "$CONFIG" | jq -r '.admob_rewarded_id // ""')
+          SPLASH_TEXT_COLOR=$(echo "$CONFIG" | jq -r '.splash_text_color // ""')
+          SPLASH_LOADER_COLOR=$(echo "$CONFIG" | jq -r '.splash_loader_color // ""')
+          CONFIG_API_BASE_URL=$(echo "$CONFIG" | jq -r '.api_base_url // ""')
+          CONFIG_SUPABASE_ANON_KEY=$(echo "$CONFIG" | jq -r '.supabase_anon_key // ""')
+          KEYSTORE_B64=$(echo "$CONFIG" | jq -r '.keystore_base64 // ""')
+          KEYSTORE_PWD=$(echo "$CONFIG" | jq -r '.keystore_password // ""')
+          KEY_ALIAS_CFG=$(echo "$CONFIG" | jq -r '.key_alias // ""')
+          KEY_PWD_CFG=$(echo "$CONFIG" | jq -r '.key_password // ""')
+
+          echo "SHOW_APP_BAR=$SHOW_APP_BAR"
+          echo "ORIENTATION=$ORIENTATION"
+          echo "FULL_SCREEN=$FULL_SCREEN"
+          echo "PUSH_ENABLED=$PUSH_ENABLED"
+          echo "PROJECT_ID=$PROJECT_ID"
+          echo "PUSH_PROJECT_ID=$PUSH_PROJECT_ID"
+          echo "SPLASH_COLOR=$SPLASH_COLOR"
+          echo "SPLASH_DESIGN=$SPLASH_DESIGN"
+          echo "SPLASH_TEXT=$SPLASH_TEXT"
+          echo "SPLASH_ANIMATION=$SPLASH_ANIMATION"
+          echo "ICON_URL=$ICON_URL"
+          echo "FIREBASE_APP_ID=$FIREBASE_APP_ID"
+          echo "GOOGLE_WEB_CLIENT_ID length=${#GOOGLE_WEB_CLIENT_ID}"
+          echo "FREE_TIER=$FREE_TIER"
+          echo "ADMOB_REWARDED_ID=$ADMOB_REWARDED_ID"
+          echo "SPLASH_TEXT_COLOR=$SPLASH_TEXT_COLOR"
+          echo "SPLASH_LOADER_COLOR=$SPLASH_LOADER_COLOR"
+          echo "KEYSTORE_B64 length=${#KEYSTORE_B64}"
+
+          echo "show_app_bar=$SHOW_APP_BAR" >> "$GITHUB_OUTPUT"
+          echo "orientation=$ORIENTATION" >> "$GITHUB_OUTPUT"
+          echo "full_screen=$FULL_SCREEN" >> "$GITHUB_OUTPUT"
+          echo "push_enabled=$PUSH_ENABLED" >> "$GITHUB_OUTPUT"
+          echo "project_id=$PROJECT_ID" >> "$GITHUB_OUTPUT"
+          echo "push_project_id=$PUSH_PROJECT_ID" >> "$GITHUB_OUTPUT"
+          echo "admob_app_id=$ADMOB_APP_ID" >> "$GITHUB_OUTPUT"
+          echo "admob_banner_id=$ADMOB_BANNER_ID" >> "$GITHUB_OUTPUT"
+          echo "admob_interstitial_id=$ADMOB_INTERSTITIAL_ID" >> "$GITHUB_OUTPUT"
+          echo "splash_color=$SPLASH_COLOR" >> "$GITHUB_OUTPUT"
+          echo "splash_design=$SPLASH_DESIGN" >> "$GITHUB_OUTPUT"
+          echo "splash_text=$SPLASH_TEXT" >> "$GITHUB_OUTPUT"
+          echo "splash_animation=$SPLASH_ANIMATION" >> "$GITHUB_OUTPUT"
+          echo "icon_url=$ICON_URL" >> "$GITHUB_OUTPUT"
+          echo "firebase_app_id=$FIREBASE_APP_ID" >> "$GITHUB_OUTPUT"
+          echo "google_web_client_id=$GOOGLE_WEB_CLIENT_ID" >> "$GITHUB_OUTPUT"
+          echo "free_tier=$FREE_TIER" >> "$GITHUB_OUTPUT"
+          echo "auto_inject_viewport=$AUTO_INJECT_VIEWPORT" >> "$GITHUB_OUTPUT"
+          echo "admob_rewarded_id=$ADMOB_REWARDED_ID" >> "$GITHUB_OUTPUT"
+          echo "splash_text_color=$SPLASH_TEXT_COLOR" >> "$GITHUB_OUTPUT"
+          echo "splash_loader_color=$SPLASH_LOADER_COLOR" >> "$GITHUB_OUTPUT"
+          echo "api_base_url=$CONFIG_API_BASE_URL" >> "$GITHUB_OUTPUT"
+          echo "supabase_anon_key=$CONFIG_SUPABASE_ANON_KEY" >> "$GITHUB_OUTPUT"
+          echo "keystore_base64=$KEYSTORE_B64" >> "$GITHUB_OUTPUT"
+          echo "keystore_password=$KEYSTORE_PWD" >> "$GITHUB_OUTPUT"
+          echo "key_alias=$KEY_ALIAS_CFG" >> "$GITHUB_OUTPUT"
+          echo "key_password=$KEY_PWD_CFG" >> "$GITHUB_OUTPUT"
+
+      - name: Derive version name
+        id: cfg
+        run: |
+          CUSTOM_VC="${{ steps.inputs.outputs.version_code }}"
+          if [ -n "$CUSTOM_VC" ] && [ "$CUSTOM_VC" -gt 0 ] 2>/dev/null; then
+            VC="$CUSTOM_VC"
+          else
+            VC="${{ github.run_number }}"
+            VC="${VC:-1}"
+          fi
+          CUSTOM_VN="${{ steps.inputs.outputs.version_name }}"
+          if [ -n "$CUSTOM_VN" ]; then
+            VN="$CUSTOM_VN"
+          else
+            VN="1.$((VC - 1))"
+          fi
+          echo "version_code=$VC" >> "$GITHUB_OUTPUT"
+          echo "version_name=$VN" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Gradle 8.11.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Apply theme color
+        run: |
+          THEME="${{ steps.inputs.outputs.theme_color }}"
+          THEME="${THEME:-#1D4ED8}"
+          SPLASH_TEXT_VAL="${{ steps.config.outputs.splash_text }}"
+          SPLASH_DESIGN_VAL="${{ steps.config.outputs.splash_design }}"
+          if [ -z "$SPLASH_TEXT_VAL" ] && { [ "$SPLASH_DESIGN_VAL" = "none" ] || [ -z "$SPLASH_DESIGN_VAL" ]; }; then
+            # Splash disabled — neutralize Android 12+ OS splash bg so cold start looks normal
+            SPLASH_BG="#FFFFFF"
+          else
+            SPLASH_BG="${{ steps.config.outputs.splash_color }}"
+            SPLASH_BG="${SPLASH_BG:-$THEME}"
+          fi
+          cat > app/src/main/res/values/colors.xml << EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="primary">$THEME</color>
+              <color name="primary_dark">$THEME</color>
+              <color name="accent">$THEME</color>
+              <color name="splash_bg">$SPLASH_BG</color>
+              <color name="launch_bg">$SPLASH_BG</color>
+              <color name="splash_text">#1E293B</color>
+          </resources>
+          EOF
+
+      - name: Configure Android 12+ system splash icon
+        run: |
+          SPLASH_TEXT_VAL="${{ steps.config.outputs.splash_text }}"
+          SPLASH_DESIGN_VAL="${{ steps.config.outputs.splash_design }}"
+          mkdir -p app/src/main/res/values-v31
+          if [ -z "$SPLASH_TEXT_VAL" ] && { [ "$SPLASH_DESIGN_VAL" = "none" ] || [ -z "$SPLASH_DESIGN_VAL" ]; }; then
+            echo "Splash disabled — hiding Android 12+ OS splash icon"
+            mkdir -p app/src/main/res/drawable
+            cat > app/src/main/res/drawable/splash_transparent_icon.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#00000000" android:pathData="M0,0h108v108h-108z" />
+          </vector>
+          EOF
+            cat > app/src/main/res/values-v31/themes.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.WebViewApp.Splash" parent="Theme.SplashScreen">
+                  <item name="windowSplashScreenBackground">@color/splash_bg</item>
+                  <item name="windowSplashScreenAnimatedIcon">@drawable/splash_transparent_icon</item>
+                  <item name="windowSplashScreenIconBackgroundColor">@color/splash_bg</item>
+                  <item name="windowSplashScreenAnimationDuration">0</item>
+                  <item name="postSplashScreenTheme">@style/Theme.WebViewApp</item>
+              </style>
+          </resources>
+          EOF
+          else
+            echo "Splash enabled — splash covers full window; post-splash status=theme color, nav=system default"
+            cat > app/src/main/res/values-v31/themes.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.WebViewApp.Splash" parent="Theme.SplashScreen">
+                  <item name="windowSplashScreenBackground">@color/splash_bg</item>
+                  <item name="windowSplashScreenAnimatedIcon">@android:color/transparent</item>
+                  <item name="android:windowBackground">@color/splash_bg</item>
+                  <item name="android:statusBarColor">@color/splash_bg</item>
+                  <item name="android:navigationBarColor">@color/splash_bg</item>
+                  <item name="postSplashScreenTheme">@style/Theme.WebViewApp.SplashPost</item>
+              </style>
+              <style name="Theme.WebViewApp.SplashPost" parent="Theme.WebViewApp">
+                  <item name="android:windowBackground">?android:attr/colorBackground</item>
+                  <item name="android:statusBarColor">@color/primary_dark</item>
+                  <item name="android:navigationBarColor">?android:attr/navigationBarColor</item>
+              </style>
+          </resources>
+          EOF
+            cat > app/src/main/res/values/themes.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.WebViewApp" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+                  <item name="colorPrimary">@color/primary</item>
+                  <item name="colorPrimaryDark">@color/primary_dark</item>
+                  <item name="colorAccent">@color/accent</item>
+                  <item name="android:statusBarColor">@color/primary_dark</item>
+                  <item name="android:navigationBarColor">?android:attr/navigationBarColor</item>
+              </style>
+
+              <style name="Theme.WebViewApp.Splash" parent="Theme.WebViewApp">
+                  <item name="android:windowBackground">@color/splash_bg</item>
+                  <item name="android:statusBarColor">@color/splash_bg</item>
+                  <item name="android:navigationBarColor">@color/splash_bg</item>
+              </style>
+              <style name="Theme.WebViewApp.SplashPost" parent="Theme.WebViewApp">
+                  <item name="android:statusBarColor">@color/primary_dark</item>
+                  <item name="android:navigationBarColor">?android:attr/navigationBarColor</item>
+              </style>
+          </resources>
+          EOF
+          fi
+
+      - name: Configure launcher activity
+        run: |
+          SPLASH_TEXT_VAL="${{ steps.config.outputs.splash_text }}"
+          SPLASH_DESIGN_VAL="${{ steps.config.outputs.splash_design }}"
+          export SPLASH_TEXT_VAL SPLASH_DESIGN_VAL
+          python3 <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          ANDROID = '{http://schemas.android.com/apk/res/android}'
+          ET.register_namespace('android', 'http://schemas.android.com/apk/res/android')
+          manifest = Path('app/src/main/AndroidManifest.xml')
+          tree = ET.parse(manifest)
+          root = tree.getroot()
+          app = root.find('application')
+          splash = main = None
+          for activity in app.findall('activity'):
+              name = activity.get(ANDROID + 'name')
+              if name == '.SplashActivity':
+                  splash = activity
+              elif name == '.MainActivity':
+                  main = activity
+
+          def is_launcher_filter(intent_filter):
+              has_main = any(child.tag == 'action' and child.get(ANDROID + 'name') == 'android.intent.action.MAIN' for child in intent_filter)
+              has_launcher = any(child.tag == 'category' and child.get(ANDROID + 'name') == 'android.intent.category.LAUNCHER' for child in intent_filter)
+              return has_main and has_launcher
+
+          def remove_launcher(activity):
+              for child in list(activity):
+                  if child.tag == 'intent-filter' and is_launcher_filter(child):
+                      activity.remove(child)
+
+          def ensure_launcher(activity):
+              if any(child.tag == 'intent-filter' and is_launcher_filter(child) for child in activity):
+                  return
+              intent = ET.Element('intent-filter')
+              ET.SubElement(intent, 'action', {ANDROID + 'name': 'android.intent.action.MAIN'})
+              ET.SubElement(intent, 'category', {ANDROID + 'name': 'android.intent.category.LAUNCHER'})
+              activity.insert(0, intent)
+
+          splash_disabled = not os.environ.get('SPLASH_TEXT_VAL', '').strip() and os.environ.get('SPLASH_DESIGN_VAL', '').strip() in ('', 'none')
+          if splash_disabled:
+              remove_launcher(splash)
+              splash.set(ANDROID + 'exported', 'false')
+              ensure_launcher(main)
+              # MainActivity is now the launcher: give it a Theme.SplashScreen-derived
+              # theme so Android 12+ doesn't show the default OS launcher icon splash.
+              # Theme.WebViewApp.Splash in values-v31 has a transparent icon and hands
+              # off to Theme.WebViewApp via postSplashScreenTheme.
+              main.set(ANDROID + 'theme', '@style/Theme.WebViewApp.Splash')
+          else:
+              remove_launcher(main)
+              splash.set(ANDROID + 'exported', 'true')
+              ensure_launcher(splash)
+              # Reset MainActivity theme so it inherits @style/Theme.WebViewApp from
+              # <application> — keeps splash-enabled flow byte-identical to before
+              # even on re-runs that previously set the splash theme on MainActivity.
+              main.attrib.pop(ANDROID + 'theme', None)
+          tree.write(manifest, encoding='utf-8', xml_declaration=True)
+          print('Launcher activity:', 'MainActivity' if splash_disabled else 'SplashActivity')
+          PY
+
+      - name: Set up app icon
+        run: |
+          ICON_URL="${{ steps.config.outputs.icon_url }}"
+          ICON_BG_COLOR="${{ steps.inputs.outputs.theme_color }}"
+          ICON_BG_COLOR="${ICON_BG_COLOR:-#1D4ED8}"
+          CUSTOM_ICON_USED="false"
+
+          if ! command -v convert &> /dev/null; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq imagemagick > /dev/null 2>&1
+          fi
+
+          generate_default_icon() {
+            echo "Generating professional default icon..."
+            convert -size 1024x1024 xc:none \
+              -fill "$ICON_BG_COLOR" -draw "roundrectangle 0,0 1023,1023 224,224" \
+              -fill none -stroke "#FFFFFF" -strokewidth 56 \
+              -draw "circle 512,512 782,512" \
+              -strokewidth 40 \
+              -draw "ellipse 512,512 150,270 0,360" \
+              -draw "ellipse 512,512 270,118 0,360" \
+              -strokewidth 28 \
+              -draw "ellipse 512,512 270,190 0,360" \
+              -strokewidth 40 \
+              -draw "line 242,512 782,512" \
+              /tmp/icon_legacy_base.png
+
+            convert -size 1024x1024 xc:none \
+              -fill none -stroke "#FFFFFF" -strokewidth 56 \
+              -draw "circle 512,512 782,512" \
+              -strokewidth 40 \
+              -draw "ellipse 512,512 150,270 0,360" \
+              -draw "ellipse 512,512 270,118 0,360" \
+              -strokewidth 28 \
+              -draw "ellipse 512,512 270,190 0,360" \
+              -strokewidth 40 \
+              -draw "line 242,512 782,512" \
+              /tmp/icon_foreground_base.png
+          }
+
+          if [ -n "$ICON_URL" ]; then
+            echo "Custom icon URL detected. Processing icon..."
+            if curl -fsSL -o /tmp/icon_source "$ICON_URL" && identify /tmp/icon_source > /dev/null 2>&1; then
+              # Normalize first, then trim outer transparent/white padding (common from AI-generated icons)
+              convert /tmp/icon_source -auto-orient -background none -alpha set /tmp/icon_oriented.png
+              convert /tmp/icon_oriented.png -fuzz 10% -trim +repage /tmp/icon_trimmed.png
+              echo "Trimmed icon: $(identify -format '%wx%h' /tmp/icon_trimmed.png)"
+              # Force into a square canvas so subsequent resize+extent stays centered
+              SRC_W=$(identify -format "%w" /tmp/icon_trimmed.png)
+              SRC_H=$(identify -format "%h" /tmp/icon_trimmed.png)
+              MAX=$(( SRC_W > SRC_H ? SRC_W : SRC_H ))
+              convert /tmp/icon_trimmed.png -background none -gravity center -extent ${MAX}x${MAX} /tmp/icon_square.png
+              # Auto-detect background color from the icon corners.
+              #   1. Opaque corner -> sample its color (logo has solid bg, blend seamlessly).
+              #   2. Transparent corner -> measure logo's mean luminance and pick contrasting neutral.
+              #   3. Anything fails -> keep theme color / #1D4ED8 fallback already set above.
+              CORNER_ALPHA=$(convert /tmp/icon_square.png -gravity NorthWest -crop 32x32+0+0 +repage \
+                -resize 1x1\! -format "%[fx:int(a*100)]" info: 2>/dev/null || echo "100")
+              if [ "${CORNER_ALPHA:-100}" -ge 50 ]; then
+                SAMPLED_BG=$(convert /tmp/icon_square.png -gravity NorthWest -crop 32x32+0+0 +repage \
+                  -resize 1x1\! -alpha off -format "#%[hex:p{0,0}]" info: 2>/dev/null || echo "")
+                if [ -n "$SAMPLED_BG" ] && [ "$SAMPLED_BG" != "#" ]; then
+                  ICON_BG_COLOR="$SAMPLED_BG"
+                  echo "Icon bg sampled from corner: $ICON_BG_COLOR"
+                fi
+              else
+                # Transparent corners: default to a dark canvas so dark logos blend
+                # edge-to-edge (no white bands). User can override via theme color
+                # if they explicitly want light.
+                ICON_BG_COLOR="#1a1a1a"
+                echo "Icon bg: dark (transparent corners, no white bands)"
+              fi
+              # Legacy icon: centered with safe padding so round/circle masks cannot make it look shifted
+              convert /tmp/icon_square.png -background "$ICON_BG_COLOR" -alpha remove -alpha off -gravity center -resize 820x820 -extent 1024x1024 /tmp/icon_legacy_base.png
+              # Adaptive foreground: respect the ~66% safe zone (680/1024) so masks don't clip the logo
+              convert /tmp/icon_square.png -background none -gravity center -resize 680x680 -extent 1024x1024 /tmp/icon_foreground_base.png
+              CUSTOM_ICON_USED="true"
+            else
+              echo "Icon download failed. Falling back to default icon."
+              generate_default_icon
+            fi
+          else
+            echo "No custom icon provided. Using default icon."
+            generate_default_icon
+          fi
+
+          for pair in "mdpi:48:108" "hdpi:72:162" "xhdpi:96:216" "xxhdpi:144:324" "xxxhdpi:192:432"; do
+            density=$(echo "$pair" | cut -d: -f1)
+            size=$(echo "$pair" | cut -d: -f2)
+            fg=$(echo "$pair" | cut -d: -f3)
+            mkdir -p app/src/main/res/mipmap-$density
+            convert /tmp/icon_legacy_base.png -resize ${size}x${size} -gravity center -background "$ICON_BG_COLOR" -extent ${size}x${size} app/src/main/res/mipmap-$density/ic_launcher.png || true
+            # Generate proper circular round icon
+            HALF=$((size / 2))
+            convert /tmp/icon_legacy_base.png -resize ${size}x${size} -gravity center -background "$ICON_BG_COLOR" -extent ${size}x${size} \
+              \( +clone -threshold -1 -negate -fill white -draw "circle ${HALF},${HALF} ${HALF},0" \) \
+              -alpha off -compose copy_opacity -composite \
+              app/src/main/res/mipmap-$density/ic_launcher_round.png || true
+            convert /tmp/icon_foreground_base.png -resize ${fg}x${fg} -gravity center -background none -extent ${fg}x${fg} app/src/main/res/mipmap-$density/ic_launcher_foreground.png || true
+          done
+
+          mkdir -p app/src/main/res/mipmap-anydpi-v26
+          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml << XMLEOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/ic_launcher_background"/>
+              <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
+          </adaptive-icon>
+          XMLEOF
+          cp app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
+
+          # Always use auto-detected (or fallback) bg so adaptive icon matches legacy/round
+          LAUNCHER_BG="${ICON_BG_COLOR}"
+          cat > app/src/main/res/values/ic_launcher_background.xml << BGEOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="ic_launcher_background">${LAUNCHER_BG}</color>
+          </resources>
+          BGEOF
+
+      - name: Configure Firebase / Push Notifications
+        if: steps.config.outputs.push_enabled == 'true'
+        run: |
+          FIREBASE_PROJECT_NUMBER='${{ secrets.FIREBASE_PROJECT_NUMBER }}'
+          FIREBASE_WEB_API_KEY='${{ secrets.FIREBASE_WEB_API_KEY }}'
+          APP_ID='${{ steps.inputs.outputs.package_name }}'
+
+          if [ -z "$FIREBASE_PROJECT_NUMBER" ] || [ -z "$FIREBASE_WEB_API_KEY" ]; then
+            echo "::error::FIREBASE_PROJECT_NUMBER or FIREBASE_WEB_API_KEY secret is missing. Push-enabled builds require Firebase secrets."
+            exit 1
+          fi
+
+          echo "Enabling Firebase Cloud Messaging for $APP_ID..."
+
+          # Dynamically generate google-services.json for any package name
+          # The template build.gradle already has: if (file("google-services.json").exists()) { apply plugin: 'com.google.gms.google-services' }
+          # and Firebase deps are included in the template. No sed modifications needed.
+          FIREBASE_APP_ID='${{ steps.config.outputs.firebase_app_id }}'
+          if [ -z "$FIREBASE_APP_ID" ]; then
+            FIREBASE_APP_ID="1:${FIREBASE_PROJECT_NUMBER}:android:placeholder"
+            echo "WARNING: No Firebase app ID provided, using placeholder. Push may not work."
+          fi
+          echo "Using Firebase App ID: $FIREBASE_APP_ID"
+          cat > app/google-services.json << GSEOF
+          {
+            "project_info": {
+              "project_number": "$FIREBASE_PROJECT_NUMBER",
+              "project_id": "web2native-push",
+              "storage_bucket": "web2native-push.firebasestorage.app"
+            },
+            "client": [
+              {
+                "client_info": {
+                  "mobilesdk_app_id": "$FIREBASE_APP_ID",
+                  "android_client_info": {
+                    "package_name": "$APP_ID"
+                  }
+                },
+                "api_key": [
+                  {
+                    "current_key": "$FIREBASE_WEB_API_KEY"
+                  }
+                ],
+                "services": {
+                  "appinvite_service": {
+                    "other_platform_oauth_client": []
+                  }
+                }
+              }
+            ],
+            "configuration_version": "1"
+          }
+          GSEOF
+
+          echo "Firebase setup complete (dynamic config for $APP_ID). Template already includes plugin, deps, and FCM service."
+
+      - name: Validate backend secrets for push registration
+        if: steps.config.outputs.push_enabled == 'true'
+        run: |
+          API_URL="${{ steps.config.outputs.api_base_url }}"
+          ANON_KEY="${{ steps.config.outputs.supabase_anon_key }}"
+          if [ -z "$API_URL" ]; then API_URL="${{ secrets.SUPABASE_URL }}"; fi
+          if [ -z "$ANON_KEY" ]; then ANON_KEY="${{ secrets.SUPABASE_ANON_KEY }}"; fi
+          if [ -z "$API_URL" ] || [ -z "$ANON_KEY" ]; then
+            echo "::error::API_BASE_URL or SUPABASE_ANON_KEY is missing. Push-enabled builds require backend credentials for token registration."
+            exit 1
+          fi
+
+      - name: Remove FCM service if push disabled
+        if: steps.config.outputs.push_enabled != 'true'
+        run: |
+          # Remove the FCM service Kotlin file
+          rm -f app/src/main/kotlin/com/web2native/app/WebToNativeFirebaseService.kt
+
+          # Remove the FCM service entry from AndroidManifest.xml to prevent build failure
+          python3 <<'PY'
+          import re
+          from pathlib import Path
+          manifest = Path("app/src/main/AndroidManifest.xml")
+          text = manifest.read_text()
+          # Remove the <service ... WebToNativeFirebaseService ... </service> block
+          text = re.sub(
+              r'\s*<service\s+android:name="\.WebToNativeFirebaseService".*?</service>',
+              '', text, flags=re.DOTALL)
+          manifest.write_text(text)
+          print("Removed FCM service from AndroidManifest.xml")
+          PY
+
+      - name: Normalize AdMob config
+        run: |
+          ADMOB_ID="${{ steps.config.outputs.admob_app_id }}"
+          if [ -z "$ADMOB_ID" ]; then
+            echo "AdMob disabled for this build. Keeping SDK intact and skipping runtime initialization."
+          else
+            echo "AdMob enabled for this build."
+          fi
+
+      - name: Set up signing keystore
+        id: build_keystore
+        run: |
+          FREE_TIER="${{ steps.config.outputs.free_tier }}"
+          if [ "$FREE_TIER" = "true" ]; then
+            echo "Free tier build — skipping release keystore (debug-signed only)"
+            echo "sha1=" >> "$GITHUB_OUTPUT"
+            echo "keystore_generated=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          KEYSTORE_PATH="${{ github.workspace }}/keystore.jks"
+          PROVIDED_KEYSTORE_B64="${{ steps.config.outputs.keystore_base64 }}"
+          KEYSTORE_PASSWORD="${{ steps.config.outputs.keystore_password }}"
+          KEY_ALIAS="${{ steps.config.outputs.key_alias }}"
+          KEY_PASSWORD="${{ steps.config.outputs.key_password }}"
+
+          # Defaults
+          KEYSTORE_PASSWORD="${KEYSTORE_PASSWORD:-android}"
+          KEY_ALIAS="${KEY_ALIAS:-upload}"
+          KEY_PASSWORD="${KEY_PASSWORD:-android}"
+
+          GENERATED="false"
+          if [ -n "$PROVIDED_KEYSTORE_B64" ]; then
+            echo "Using persisted keystore from project secrets"
+            echo "$PROVIDED_KEYSTORE_B64" | base64 -d > "$KEYSTORE_PATH"
+          else
+            echo "No persisted keystore — generating new one"
+            keytool -genkeypair -v \
+              -keystore "$KEYSTORE_PATH" -alias "$KEY_ALIAS" \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$KEYSTORE_PASSWORD" -keypass "$KEY_PASSWORD" \
+              -dname "CN=Web2Native, OU=Apps, O=Web2Native, L=Internet, ST=Cloud, C=US"
+            GENERATED="true"
+          fi
+
+          SHA1=$(keytool -list -v -keystore "$KEYSTORE_PATH" -alias "$KEY_ALIAS" -storepass "$KEYSTORE_PASSWORD" 2>/dev/null | grep "SHA1:" | awk '{print $2}')
+          echo "Keystore SHA-1: $SHA1"
+          echo "sha1=$SHA1" >> "$GITHUB_OUTPUT"
+          echo "keystore_generated=$GENERATED" >> "$GITHUB_OUTPUT"
+
+          cat > signing.properties << EOF
+          storeFile=$KEYSTORE_PATH
+          storePassword=$KEYSTORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+
+      - name: Persist keystore to backend
+        if: steps.build_keystore.outputs.keystore_generated == 'true'
+        run: |
+          KEYSTORE_PATH="${{ github.workspace }}/keystore.jks"
+          PROJECT_ID="${{ steps.config.outputs.project_id }}"
+          API_URL="${{ steps.config.outputs.api_base_url }}"
+          ANON_KEY="${{ steps.config.outputs.supabase_anon_key }}"
+          BUILD_SECRET="${{ secrets.BUILD_SECRET }}"
+          if [ -z "$API_URL" ]; then API_URL="${{ secrets.SUPABASE_URL }}"; fi
+          if [ -z "$ANON_KEY" ]; then ANON_KEY="${{ secrets.SUPABASE_ANON_KEY }}"; fi
+
+          # Safe diagnostics — never print the secret itself
+          echo "=== Persist keystore diagnostics ==="
+          echo "PROJECT_ID present:   $([ -n "$PROJECT_ID" ] && echo yes || echo NO)"
+          echo "API_URL present:      $([ -n "$API_URL" ] && echo yes || echo NO)"
+          echo "ANON_KEY present:     $([ -n "$ANON_KEY" ] && echo yes || echo NO)"
+          echo "BUILD_SECRET present: $([ -n "$BUILD_SECRET" ] && echo yes || echo NO)"
+          echo "BUILD_SECRET length:  ${#BUILD_SECRET}"
+          # Strip leading/trailing whitespace/newlines defensively
+          BUILD_SECRET_TRIMMED="$(printf '%s' "$BUILD_SECRET" | tr -d '\r\n\t ')"
+          echo "BUILD_SECRET trimmed length: ${#BUILD_SECRET_TRIMMED}"
+
+          if [ -z "$PROJECT_ID" ] || [ -z "$API_URL" ] || [ -z "$ANON_KEY" ]; then
+            echo "Missing project_id or API credentials — skipping keystore persistence"
+            exit 0
+          fi
+
+          if [ -z "$BUILD_SECRET_TRIMMED" ]; then
+            echo "ERROR: BUILD_SECRET not configured as GitHub Actions secret"
+            echo "Keystore cannot be persisted — future builds will produce a NEW SHA and break Play Store updates"
+            exit 1
+          fi
+
+          KEYSTORE_B64=$(base64 -w 0 "$KEYSTORE_PATH")
+          KEYSTORE_PASSWORD="${{ steps.config.outputs.keystore_password }}"
+          KEY_ALIAS="${{ steps.config.outputs.key_alias }}"
+          KEY_PASSWORD="${{ steps.config.outputs.key_password }}"
+          KEYSTORE_PASSWORD="${KEYSTORE_PASSWORD:-android}"
+          KEY_ALIAS="${KEY_ALIAS:-upload}"
+          KEY_PASSWORD="${KEY_PASSWORD:-android}"
+
+          echo "Persisting keystore for project $PROJECT_ID..."
+          HTTP_CODE=$(curl -s -o /tmp/persist_response.json -w "%{http_code}" \
+            -X POST "${API_URL}/functions/v1/persist-keystore" \
+            -H "Content-Type: application/json" \
+            -H "apikey: ${ANON_KEY}" \
+            -H "x-build-secret: ${BUILD_SECRET_TRIMMED}" \
+            -d "{\"project_id\": \"${PROJECT_ID}\", \"keystore_base64\": \"${KEYSTORE_B64}\", \"keystore_password\": \"${KEYSTORE_PASSWORD}\", \"key_alias\": \"${KEY_ALIAS}\", \"key_password\": \"${KEY_PASSWORD}\"}")
+
+          echo "Persist response ($HTTP_CODE):"
+          cat /tmp/persist_response.json
+          echo ""
+
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+            echo "Keystore persisted successfully"
+          else
+            echo "ERROR: Keystore persistence failed — failing build to prevent SHA mismatch on Play Store"
+            exit 1
+          fi
+
+
+      - name: Register SHA-1 with Firebase (auto)
+        if: steps.config.outputs.google_web_client_id != ''
+        run: |
+          SHA1="${{ steps.build_keystore.outputs.sha1 }}"
+          # Fallback: extract SHA-1 again if output was empty
+          if [ -z "$SHA1" ]; then
+            SHA1=$(keytool -list -v -keystore "${{ github.workspace }}/keystore.jks" -alias "upload" -storepass "android" 2>/dev/null | grep "SHA1:" | awk '{print $2}')
+          fi
+          PACKAGE="${{ steps.inputs.outputs.package_name }}"
+          API_URL="${{ steps.config.outputs.api_base_url }}"
+          ANON_KEY="${{ steps.config.outputs.supabase_anon_key }}"
+          if [ -z "$API_URL" ]; then API_URL="${{ secrets.SUPABASE_URL }}"; fi
+          if [ -z "$ANON_KEY" ]; then ANON_KEY="${{ secrets.SUPABASE_ANON_KEY }}"; fi
+
+          if [ -z "$SHA1" ] || [ -z "$API_URL" ] || [ -z "$ANON_KEY" ]; then
+            echo "Missing SHA-1 or Supabase credentials — skipping Firebase SHA registration"
+            exit 0
+          fi
+
+          echo "Registering SHA-1 $SHA1 for package $PACKAGE..."
+          HTTP_CODE=$(curl -s -o /tmp/sha_response.json -w "%{http_code}" \
+            -X POST "${API_URL}/functions/v1/register-firebase-sha" \
+            -H "Content-Type: application/json" \
+            -H "apikey: ${ANON_KEY}" \
+            -d "{\"package_name\": \"${PACKAGE}\", \"sha1_fingerprint\": \"${SHA1}\"}")
+
+          echo "Response ($HTTP_CODE):"
+          cat /tmp/sha_response.json
+          echo ""
+
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+            echo "SHA-1 registration successful"
+          else
+            echo "SHA-1 registration failed (non-fatal) — Google Sign-In may not work"
+          fi
+
+      - name: Verify env vars before build
+        env:
+          CM_SHOW_APP_BAR: ${{ steps.config.outputs.show_app_bar }}
+          CM_FULL_SCREEN: ${{ steps.config.outputs.full_screen }}
+          CM_PUSH_ENABLED: ${{ steps.config.outputs.push_enabled }}
+          CM_SPLASH_DESIGN: ${{ steps.config.outputs.splash_design }}
+          CM_SPLASH_COLOR: ${{ steps.config.outputs.splash_color }}
+          CM_PROJECT_ID: ${{ steps.config.outputs.project_id }}
+          CM_PUSH_PROJECT_ID: ${{ steps.config.outputs.push_project_id }}
+          CM_SPLASH_ANIMATION: ${{ steps.config.outputs.splash_animation }}
+          CM_SPLASH_TEXT: ${{ steps.config.outputs.splash_text }}
+          CM_GOOGLE_WEB_CLIENT_ID: ${{ steps.config.outputs.google_web_client_id }}
+        run: |
+          echo "=== ENV VARS PASSED TO GRADLE ==="
+          echo "CM_SHOW_APP_BAR=$CM_SHOW_APP_BAR"
+          echo "CM_FULL_SCREEN=$CM_FULL_SCREEN"
+          echo "CM_PUSH_ENABLED=$CM_PUSH_ENABLED"
+          echo "CM_SPLASH_DESIGN=$CM_SPLASH_DESIGN"
+          echo "CM_SPLASH_COLOR=$CM_SPLASH_COLOR"
+          echo "CM_SPLASH_ANIMATION=$CM_SPLASH_ANIMATION"
+          echo "CM_SPLASH_TEXT=$CM_SPLASH_TEXT"
+          echo "CM_PROJECT_ID=$CM_PROJECT_ID"
+          echo "CM_PUSH_PROJECT_ID=$CM_PUSH_PROJECT_ID"
+
+      - name: Ensure Gradle wrapper executable
+        run: chmod +x ./gradlew
+
+      - name: Build Android artifacts
+        env:
+          CM_APP_NAME: ${{ steps.inputs.outputs.app_name }}
+          CM_APP_ID: ${{ steps.inputs.outputs.package_name }}
+          CM_WEBSITE_URL: ${{ steps.inputs.outputs.website_url }}
+          CM_SPLASH_TEXT: ${{ steps.config.outputs.splash_text }}
+          CM_SPLASH_ANIMATION: ${{ steps.config.outputs.splash_animation }}
+          CM_SPLASH_COLOR: ${{ steps.config.outputs.splash_color }}
+          CM_SPLASH_DESIGN: ${{ steps.config.outputs.splash_design }}
+          CM_THEME_COLOR: ${{ steps.inputs.outputs.theme_color }}
+          CM_SHOW_APP_BAR: ${{ steps.config.outputs.show_app_bar }}
+          CM_ORIENTATION: ${{ steps.config.outputs.orientation }}
+          CM_FULL_SCREEN: ${{ steps.config.outputs.full_screen }}
+          CM_PUSH_ENABLED: ${{ steps.config.outputs.push_enabled }}
+          CM_VERSION_CODE: ${{ steps.cfg.outputs.version_code }}
+          CM_VERSION_NAME: ${{ steps.cfg.outputs.version_name }}
+          CM_BUILD_FORMAT: ${{ steps.inputs.outputs.build_format }}
+          CM_ADMOB_APP_ID: ${{ steps.config.outputs.admob_app_id }}
+          CM_ADMOB_BANNER_ID: ${{ steps.config.outputs.admob_banner_id }}
+          CM_ADMOB_INTERSTITIAL_ID: ${{ steps.config.outputs.admob_interstitial_id }}
+          CM_ADMOB_REWARDED_ID: ${{ steps.config.outputs.admob_rewarded_id }}
+          CM_API_BASE_URL: ${{ steps.config.outputs.api_base_url || secrets.SUPABASE_URL }}
+          CM_PROJECT_ID: ${{ steps.config.outputs.project_id }}
+          CM_PUSH_PROJECT_ID: ${{ steps.config.outputs.push_project_id }}
+          CM_SUPABASE_ANON_KEY: ${{ steps.config.outputs.supabase_anon_key || secrets.SUPABASE_ANON_KEY }}
+          CM_GOOGLE_WEB_CLIENT_ID: ${{ steps.config.outputs.google_web_client_id }}
+          CM_FREE_TIER: ${{ steps.config.outputs.free_tier }}
+          CM_AUTO_INJECT_VIEWPORT: ${{ steps.config.outputs.auto_inject_viewport }}
+          CM_SPLASH_TEXT_COLOR: ${{ steps.config.outputs.splash_text_color }}
+          CM_SPLASH_LOADER_COLOR: ${{ steps.config.outputs.splash_loader_color }}
+        run: |
+          set -euo pipefail
+          echo "=== GRADLE BUILD ENV VERIFICATION ==="
+          echo "CM_SHOW_APP_BAR=$CM_SHOW_APP_BAR"
+          echo "CM_FULL_SCREEN=$CM_FULL_SCREEN"
+          echo "CM_PUSH_ENABLED=$CM_PUSH_ENABLED"
+          echo "CM_SPLASH_DESIGN=$CM_SPLASH_DESIGN"
+          echo "CM_SPLASH_ANIMATION=$CM_SPLASH_ANIMATION"
+          echo "CM_SPLASH_TEXT=$CM_SPLASH_TEXT"
+          echo "CM_PROJECT_ID length=${#CM_PROJECT_ID}"
+          echo "CM_PUSH_PROJECT_ID length=${#CM_PUSH_PROJECT_ID}"
+          echo "CM_API_BASE_URL length=${#CM_API_BASE_URL}"
+          echo "CM_SUPABASE_ANON_KEY length=${#CM_SUPABASE_ANON_KEY}"
+          echo "CM_FREE_TIER=$CM_FREE_TIER"
+          
+          FREE_TIER="${CM_FREE_TIER:-false}"
+          FORMAT="${{ steps.inputs.outputs.build_format }}"
+          FORMAT="${FORMAT:-both}"
+
+          if [ "$FREE_TIER" = "true" ]; then
+            echo "Free tier build — building debug APK only..."
+            gradle --build-cache --stacktrace assembleDebug || gradle --build-cache --stacktrace clean assembleDebug
+          else
+            case "$FORMAT" in
+              apk)
+                echo "Building APK only..."
+                gradle --build-cache --stacktrace assembleRelease || gradle --build-cache --stacktrace clean assembleRelease
+                ;;
+              aab)
+                echo "Building AAB only..."
+                gradle --build-cache --stacktrace bundleRelease || gradle --build-cache --stacktrace clean bundleRelease
+                ;;
+              *)
+                echo "Building APK + AAB..."
+                gradle --build-cache --stacktrace assembleRelease bundleRelease || gradle --build-cache --stacktrace clean assembleRelease bundleRelease
+                ;;
+            esac
+          fi
+
+      - name: Verify built artifacts (signing + manifest sanity)
+        if: ${{ always() }}
+        continue-on-error: true
+        run: |
+          set +e
+          echo "=== APK/AAB VERIFICATION ==="
+          BT_DIR="$ANDROID_HOME/build-tools"
+          BT_VER="$(ls "$BT_DIR" 2>/dev/null | sort -V | tail -1)"
+          APKSIGNER="$BT_DIR/$BT_VER/apksigner"
+          AAPT2="$BT_DIR/$BT_VER/aapt2"
+          echo "Using build-tools: $BT_VER"
+          shopt -s globstar nullglob
+          APKS=( app/build/outputs/**/*.apk )
+          AABS=( app/build/outputs/**/*.aab )
+          echo "APKs found: ${#APKS[@]}; AABs found: ${#AABS[@]}"
+          for f in "${APKS[@]}"; do
+            echo "--- APK: $f ($(stat -c%s "$f" 2>/dev/null) bytes) ---"
+            "$APKSIGNER" verify --verbose "$f" 2>&1 | head -40
+            "$AAPT2" dump badging "$f" 2>&1 | grep -E "^(package|application-label|sdkVersion|targetSdkVersion|uses-permission)" | head -20
+            DEX_COUNT=$(unzip -l "$f" 2>/dev/null | grep -cE "classes[0-9]*\.dex$")
+            echo "dex_files=$DEX_COUNT"
+            [ "$DEX_COUNT" -lt 1 ] && echo "::warning::APK has no dex files: $f"
+          done
+          for f in "${AABS[@]}"; do
+            echo "--- AAB: $f ($(stat -c%s "$f" 2>/dev/null) bytes) ---"
+            unzip -l "$f" 2>/dev/null | head -10
+          done
+          echo "=== VERIFICATION COMPLETE ==="
+          exit 0
+
+      - name: Upload APK
+        if: ${{ steps.inputs.outputs.build_format != 'aab' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apk
+          path: app/build/outputs/**/*.apk
+          retention-days: 90
+
+      - name: Upload AAB
+        if: ${{ steps.config.outputs.free_tier != 'true' && steps.inputs.outputs.build_format != 'apk' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-aab
+          path: app/build/outputs/**/*.aab
+          retention-days: 90

@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.WebViewApp" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/primary</item>
+        <item name="colorPrimaryDark">@color/primary_dark</item>
+        <item name="colorAccent">@color/accent</item>
+        <!-- MainActivity must not draw a second full-screen splash-colour preview. -->
+        <item name="android:windowBackground">@android:color/white</item>
+        <item name="android:colorBackground">@android:color/white</item>
+        <item name="android:windowDisablePreview">true</item>
+        <item name="android:windowAnimationStyle">@null</item>
+    </style>
+
+    <style name="Theme.WebViewApp.Splash" parent="Theme.WebViewApp">
+        <item name="android:windowBackground">@color/launch_bg</item>
+        <item name="android:colorBackground">@color/launch_bg</item>
+        <item name="android:statusBarColor">@color/launch_bg</item>
+        <item name="android:navigationBarColor">@color/launch_bg</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:enforceStatusBarContrast">false</item>
+        <item name="android:enforceNavigationBarContrast">false</item>
+        <item name="android:windowDisablePreview">true</item>
+        <!-- Disable enter/exit animations so transition to MainActivity has no white frame -->
+        <item name="android:windowAnimationStyle">@null</item>
+    </style>
+
+    <!-- Used when the user disables the splash screen.
+         windowDisablePreview suppresses the system "starting window" entirely
+         (supported back to API 11). System-bar overrides ensure no white
+         status/navigation bar flash before MainActivity applies runtime colors. -->
+    <style name="Theme.WebViewApp.NoSplash" parent="Theme.WebViewApp">
+        <item name="android:statusBarColor">@color/primary_dark</item>
+        <item name="android:navigationBarColor">@android:color/black</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:enforceStatusBarContrast">false</item>
+        <item name="android:enforceNavigationBarContrast">false</item>
+        <item name="android:windowBackground">@android:color/white</item>
+        <item name="android:colorBackground">@android:color/white</item>
+        <item name="android:windowIsTranslucent">false</item>
+        <item name="android:windowDisablePreview">true</item>
+        <item name="android:windowAnimationStyle">@null</item>
+    </style>
+</resources>
