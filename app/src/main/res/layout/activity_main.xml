@@ -5,115 +5,124 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
-    <RelativeLayout
-        android:id="@+id/rootContent"
+    <FrameLayout
+        android:id="@+id/swipeContent"
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:background="@android:color/white">
+        android:layout_height="match_parent">
 
-        <!-- App Bar / Toolbar -->
-        <androidx.appcompat.widget.Toolbar
-            android:id="@+id/toolbar"
+        <RelativeLayout
+            android:id="@+id/rootContent"
             android:layout_width="match_parent"
-            android:layout_height="?attr/actionBarSize"
-            android:layout_alignParentTop="true"
-            android:visibility="visible">
+            android:layout_height="match_parent">
 
-            <TextView
-                android:id="@+id/appBarTitle"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:textColor="#FFFFFF"
-                android:textSize="18sp"
-                android:textStyle="bold" />
+            <!-- App Bar / Toolbar -->
+            <androidx.appcompat.widget.Toolbar
+                android:id="@+id/toolbar"
+                android:layout_width="match_parent"
+                android:layout_height="?attr/actionBarSize"
+                android:layout_alignParentTop="true"
+                android:visibility="visible">
 
-        </androidx.appcompat.widget.Toolbar>
+                <TextView
+                    android:id="@+id/appBarTitle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textColor="#FFFFFF"
+                    android:textSize="18sp"
+                    android:textStyle="bold" />
 
-        <ProgressBar
-            android:id="@+id/progressBar"
-            style="?android:attr/progressBarStyleHorizontal"
-            android:layout_width="match_parent"
-            android:layout_height="4dp"
-            android:layout_below="@id/toolbar"
-            android:visibility="gone" />
-
-        <WebView
-            android:id="@+id/webView"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:layout_below="@id/progressBar"
-            android:layout_above="@id/bannerAdContainer"
-            android:background="@android:color/white"
-            android:visibility="visible" />
-
-        <!-- Native loading overlay shown until page loads.
-             Default GONE — MainActivity makes it visible only when our
-             native splash is enabled. With splash disabled, the user's
-             website paints first and no branded overlay leaks through. -->
-        <LinearLayout
-            android:id="@+id/loadingOverlay"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:layout_below="@id/toolbar"
-            android:gravity="center"
-            android:orientation="vertical"
-            android:background="@android:color/white"
-            android:visibility="gone">
-
-            <ImageView
-                android:id="@+id/loadingIcon"
-                android:layout_width="72dp"
-                android:layout_height="72dp"
-                android:src="@mipmap/ic_launcher"
-                android:layout_marginBottom="16dp"
-                android:visibility="gone" />
+            </androidx.appcompat.widget.Toolbar>
 
             <ProgressBar
-                android:id="@+id/loadingSpinner"
-                android:layout_width="36dp"
-                android:layout_height="36dp"
-                android:indeterminate="true"
+                android:id="@+id/progressBar"
+                style="?android:attr/progressBarStyleHorizontal"
+                android:layout_width="match_parent"
+                android:layout_height="4dp"
+                android:layout_below="@id/toolbar"
                 android:visibility="gone" />
 
-        </LinearLayout>
+            <WebView
+                android:id="@+id/webView"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:layout_below="@id/progressBar"
+                android:layout_above="@id/bannerAdContainer"
+                android:visibility="invisible" />
 
-        <!-- Debug config text (hidden by default) -->
-        <TextView
-            android:id="@+id/debugConfigText"
+            <!-- Native loading overlay shown until page loads when splash is enabled -->
+            <LinearLayout
+                android:id="@+id/loadingOverlay"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:layout_below="@id/toolbar"
+                android:gravity="center"
+                android:orientation="vertical"
+                android:background="@android:color/transparent"
+                android:visibility="gone">
+
+                <ImageView
+                    android:id="@+id/loadingIcon"
+                    android:layout_width="72dp"
+                    android:layout_height="72dp"
+                    android:src="@mipmap/ic_launcher"
+                    android:layout_marginBottom="16dp" />
+
+                <ProgressBar
+                    android:id="@+id/loadingSpinner"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:indeterminate="true" />
+
+            </LinearLayout>
+
+            <!-- Debug config text (hidden by default) -->
+            <TextView
+                android:id="@+id/debugConfigText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_above="@id/bannerAdContainer"
+                android:layout_alignParentStart="true"
+                android:layout_margin="8dp"
+                android:padding="8dp"
+                android:background="#CC000000"
+                android:textColor="#FFFFFF"
+                android:textSize="12sp"
+                android:typeface="monospace"
+                android:visibility="gone" />
+
+            <!-- Branding watermark for free tier -->
+            <TextView
+                android:id="@+id/brandingWatermark"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_alignParentBottom="true"
+                android:text="Built with Native App AI"
+                android:textSize="13sp"
+                android:textColor="#FFFFFF"
+                android:gravity="center"
+                android:paddingVertical="10dp"
+                android:background="#1D4ED8"
+                android:visibility="gone" />
+
+            <!-- AdMob Banner Container -->
+            <FrameLayout
+                android:id="@+id/bannerAdContainer"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_alignParentBottom="true"
+                android:visibility="gone" />
+
+        </RelativeLayout>
+
+        <!-- Status bar background band: drawn over the top status-bar inset
+             area so the user-selected color is visible on every Android version
+             including Android 15+ where window.statusBarColor is ignored. -->
+        <View
+            android:id="@+id/statusBarBg"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_above="@id/bannerAdContainer"
-            android:layout_alignParentStart="true"
-            android:layout_margin="8dp"
-            android:padding="8dp"
-            android:background="#CC000000"
-            android:textColor="#FFFFFF"
-            android:textSize="12sp"
-            android:typeface="monospace"
-            android:visibility="gone" />
+            android:layout_height="0dp"
+            android:layout_gravity="top" />
 
-        <!-- Branding watermark for free tier -->
-        <TextView
-            android:id="@+id/brandingWatermark"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_alignParentBottom="true"
-            android:text="Built with Native App AI"
-            android:textSize="13sp"
-            android:textColor="#FFFFFF"
-            android:gravity="center"
-            android:paddingVertical="10dp"
-            android:background="#1D4ED8"
-            android:visibility="gone" />
-
-        <!-- AdMob Banner Container -->
-        <FrameLayout
-            android:id="@+id/bannerAdContainer"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_alignParentBottom="true"
-            android:visibility="gone" />
-
-    </RelativeLayout>
+    </FrameLayout>
 
 </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
