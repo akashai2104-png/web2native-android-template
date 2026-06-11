@@ -40,19 +40,31 @@ if (!projectId?.trim()) projectId = pushProjectId
 def supabaseAnonKey = System.getenv("CM_SUPABASE_ANON_KEY") ?: ""
 def splashColor = System.getenv("CM_SPLASH_COLOR") ?: ""
 def splashDesign = System.getenv("CM_SPLASH_DESIGN") ?: "dots"
-def splashEnabled = (System.getenv("CM_SPLASH_ENABLED") ?: (splashDesign == "none" ? "false" : "true")).toBoolean()
 def splashTextColor = System.getenv("CM_SPLASH_TEXT_COLOR") ?: ""
 def splashLoaderColor = System.getenv("CM_SPLASH_LOADER_COLOR") ?: ""
 def freeTier = System.getenv("CM_FREE_TIER") ?: "false"
 def safeAdmobAppId = admobAppId?.trim() ? admobAppId : "ca-app-pub-3940256099942544~3347511713"
+// Add-on Pack v1 (Review · URL Policy · Native Share) — additive, all safe defaults
+def reviewEnabled = (System.getenv("CM_REVIEW_ENABLED") ?: "true").toBoolean()
+def reviewMinSessions = (System.getenv("CM_REVIEW_MIN_SESSIONS") ?: "5").toInteger()
+def nativeShareEnabled = (System.getenv("CM_NATIVE_SHARE") ?: "true").toBoolean()
+def urlPolicyJson = System.getenv("CM_URL_POLICY") ?: '{"mode":"auto","allow":[],"block":[]}'
 
 // Extract host from website URL for deep linking
 def websiteHost = ""
+def websiteScheme = ""
 try {
-    websiteHost = new URI(websiteUrl).host ?: ""
+    def parsed = new URI(websiteUrl)
+    websiteHost = parsed.host ?: ""
+    websiteScheme = parsed.scheme ?: ""
 } catch (Exception e) {
     websiteHost = ""
+    websiteScheme = ""
 }
+
+// Allow cleartext traffic only when the wrapped site is http://. https sites stay strict.
+def usesCleartextTraffic = (websiteScheme?.toLowerCase() == "http") ? "true" : "false"
+println("Cleartext traffic allowed=" + usesCleartextTraffic + " (scheme=" + websiteScheme + ")")
 
 // Load signing properties if available
 def signingPropsFile = rootProject.file("signing.properties")
@@ -70,7 +82,6 @@ println("CM_SPLASH_TEXT=" + System.getenv("CM_SPLASH_TEXT"))
 println("CM_SPLASH_ANIMATION=" + System.getenv("CM_SPLASH_ANIMATION"))
 println("CM_SPLASH_COLOR=" + System.getenv("CM_SPLASH_COLOR"))
 println("CM_SPLASH_DESIGN=" + System.getenv("CM_SPLASH_DESIGN"))
-println("CM_SPLASH_ENABLED=" + System.getenv("CM_SPLASH_ENABLED"))
 println("CM_PROJECT_ID=" + System.getenv("CM_PROJECT_ID"))
 println("CM_PUSH_PROJECT_ID=" + System.getenv("CM_PUSH_PROJECT_ID"))
 println("CM_API_BASE_URL length=" + (System.getenv("CM_API_BASE_URL") ?: "").length())
@@ -80,7 +91,6 @@ println("orientation resolved=" + orientation)
 println("fullScreen resolved=" + fullScreen)
 println("pushEnabled resolved=" + pushEnabled)
 println("splashDesign resolved=" + splashDesign)
-println("splashEnabled resolved=" + splashEnabled)
 println("projectId resolved=" + projectId)
 println("pushProjectId resolved=" + pushProjectId)
 println("freeTier resolved=" + freeTier)
@@ -104,7 +114,6 @@ android {
         buildConfigField "String", "SPLASH_ANIMATION", "\"${splashAnimation}\""
         buildConfigField "String", "SPLASH_COLOR", "\"${splashColor}\""
         buildConfigField "String", "SPLASH_DESIGN", "\"${splashDesign}\""
-        buildConfigField "boolean", "SPLASH_ENABLED", splashEnabled.toString()
         buildConfigField "String", "SPLASH_TEXT_COLOR", "\"${splashTextColor}\""
         buildConfigField "String", "SPLASH_LOADER_COLOR", "\"${splashLoaderColor}\""
         buildConfigField "String", "THEME_COLOR", "\"${themeColor}\""
@@ -122,11 +131,23 @@ android {
         buildConfigField "int", "VERSION_CODE_INT", versionCodeEnv
         buildConfigField "String", "FREE_TIER", "\"${freeTier}\""
         buildConfigField "boolean", "AUTO_INJECT_VIEWPORT", autoInjectViewport.toBoolean().toString()
+        // Add-on Pack v1
+        buildConfigField "boolean", "REVIEW_ENABLED", reviewEnabled.toString()
+        buildConfigField "int", "REVIEW_MIN_SESSIONS", reviewMinSessions.toString()
+        buildConfigField "boolean", "NATIVE_SHARE_ENABLED", nativeShareEnabled.toString()
+        buildConfigField "String", "URL_POLICY_JSON", "\"${urlPolicyJson.replace('\\', '\\\\').replace('"', '\\"')}\""
+
+        // Bundle native libs for every common ABI so the APK installs on
+        // armv7 (cheap Tecno/Infinix), arm64 (modern phones), and x86/x86_64 (emulators).
+        ndk {
+            abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'
+        }
 
         // Deep linking host placeholder
         manifestPlaceholders = [
             WEBSITE_HOST: websiteHost,
-            ADMOB_APP_ID: safeAdmobAppId
+            ADMOB_APP_ID: safeAdmobAppId,
+            USES_CLEARTEXT_TRAFFIC: usesCleartextTraffic
         ]
     }
 
@@ -141,7 +162,23 @@ android {
                 storePassword signingProps['storePassword']
                 keyAlias signingProps['keyAlias']
                 keyPassword signingProps['keyPassword']
+                // Force-enable every APK signing scheme so the resulting APK installs
+                // on Android 7.x (needs v1), modern phones (v2/v3), and incremental
+                // installs on Android 11+ (v4). Without v1, several OEM ROMs reject
+                // sideloaded APKs with "App not installed" / parse errors.
+                enableV1Signing true
+                enableV2Signing true
+                enableV3Signing true
+                enableV4Signing true
             }
+        }
+    }
+
+    // Pair with extractNativeLibs="false" in the manifest. Required by AGP 8.x
+    // when shipping uncompressed native libs in the APK.
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging false
         }
     }
 
@@ -167,6 +204,7 @@ android {
 
 dependencies {
     implementation 'androidx.core:core-ktx:1.15.0'
+    implementation 'androidx.core:core-splashscreen:1.0.1'
     implementation 'androidx.appcompat:appcompat:1.7.0'
     implementation 'androidx.webkit:webkit:1.12.1'
     implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
@@ -175,4 +213,6 @@ dependencies {
     implementation 'androidx.browser:browser:1.9.0'
     implementation platform('com.google.firebase:firebase-bom:33.10.0')
     implementation 'com.google.firebase:firebase-messaging-ktx'
+    // Add-on Pack v1: Google Play In-App Review
+    implementation 'com.google.android.play:review-ktx:2.0.2'
 }
