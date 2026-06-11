@@ -40,7 +40,7 @@ workflows:
           
           KOTLIN_DIR="app/src/main/kotlin/com/web2native/app"
           RES_DIR="app/src/main/res"
-          mkdir -p "$KOTLIN_DIR" "$RES_DIR/layout" "$RES_DIR/xml" "$RES_DIR/values" "$RES_DIR/values-v31" "app/src/main/assets"
+          mkdir -p "$KOTLIN_DIR" "$RES_DIR/layout" "$RES_DIR/xml" "$RES_DIR/values" "app/src/main/assets"
           
           inject() {
             local VAR_NAME="$1" TARGET="$2"
@@ -65,7 +65,6 @@ workflows:
           inject CM_LAYOUT_SPLASH_B64    "$RES_DIR/layout/activity_splash.xml" && INJECTED=$((INJECTED+1)) || true
           inject CM_FILE_PATHS_B64       "$RES_DIR/xml/file_paths.xml"        && INJECTED=$((INJECTED+1)) || true
           inject CM_THEMES_B64           "$RES_DIR/values/themes.xml"         && INJECTED=$((INJECTED+1)) || true
-          inject CM_THEMES_V31_B64       "$RES_DIR/values-v31/themes.xml"     && INJECTED=$((INJECTED+1)) || true
           inject CM_OFFLINE_HTML_B64     "app/src/main/assets/offline.html"   && INJECTED=$((INJECTED+1)) || true
           inject CM_APP_BUILD_GRADLE_B64 "app/build.gradle"                   && INJECTED=$((INJECTED+1)) || true
           inject CM_ROOT_BUILD_GRADLE_B64 "build.gradle"                      && INJECTED=$((INJECTED+1)) || true
@@ -112,15 +111,10 @@ workflows:
       - name: Apply theme color
         script: |
           THEME="${CM_THEME_COLOR:-#1D4ED8}"
-          SPLASH_ENABLED="${CM_SPLASH_ENABLED:-true}"
-          SPLASH_DESIGN="${CM_SPLASH_DESIGN:-dots}"
-          SPLASH_COLOR="${CM_SPLASH_COLOR:-}"
-          if [ "$SPLASH_ENABLED" = "false" ] || [ "$SPLASH_DESIGN" = "none" ]; then
-            LAUNCH_BG="#FFFFFF"
-          elif [ -n "$SPLASH_COLOR" ]; then
-            LAUNCH_BG="$SPLASH_COLOR"
+          if [ -z "${CM_SPLASH_TEXT:-}" ] && { [ "${CM_SPLASH_DESIGN:-}" = "none" ] || [ -z "${CM_SPLASH_DESIGN:-}" ]; }; then
+            SPLASH_BG="#FFFFFF"
           else
-            LAUNCH_BG="$THEME"
+            SPLASH_BG="${CM_SPLASH_COLOR:-$THEME}"
           fi
           cat > app/src/main/res/values/colors.xml << EOF
           <?xml version="1.0" encoding="utf-8"?>
@@ -128,54 +122,132 @@ workflows:
               <color name="primary">$THEME</color>
               <color name="primary_dark">$THEME</color>
               <color name="accent">$THEME</color>
-              <color name="launch_bg">$LAUNCH_BG</color>
-              <color name="splash_bg">$LAUNCH_BG</color>
+              <color name="splash_bg">$SPLASH_BG</color>
+              <color name="launch_bg">$SPLASH_BG</color>
               <color name="splash_text">#1E293B</color>
           </resources>
           EOF
-
-      - name: Apply splash theme variant
-        script: |
-          SPLASH_ENABLED="${CM_SPLASH_ENABLED:-true}"
-          SPLASH_DESIGN="${CM_SPLASH_DESIGN:-dots}"
-          SPLASH_TEXT="${CM_SPLASH_TEXT:-}"
-          mkdir -p app/src/main/res/drawable
-          cat > app/src/main/res/drawable/splashscreen_transparent_icon.xml <<'EOF'
+          mkdir -p app/src/main/res/values-v31
+          if [ -z "${CM_SPLASH_TEXT:-}" ] && { [ "${CM_SPLASH_DESIGN:-}" = "none" ] || [ -z "${CM_SPLASH_DESIGN:-}" ]; }; then
+            echo "Splash disabled — hiding Android 12+ OS splash icon"
+            mkdir -p app/src/main/res/drawable
+            cat > app/src/main/res/drawable/splash_transparent_icon.xml << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
-          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
-              <size android:width="1dp" android:height="1dp" />
-              <solid android:color="@android:color/transparent" />
-          </shape>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#00000000" android:pathData="M0,0h108v108h-108z" />
+          </vector>
           EOF
-          if [ "$SPLASH_ENABLED" = "false" ] || { [ "$SPLASH_DESIGN" = "none" ] && [ -z "$SPLASH_TEXT" ]; }; then
-            echo "Splash disabled — removing SplashActivity launcher and launching MainActivity with NoSplash"
-            python3 - <<'PY'
-          import re
-          from pathlib import Path
-          manifest = Path("app/src/main/AndroidManifest.xml")
-          text = manifest.read_text()
-          text = re.sub(r'android:theme="@style/Theme\.WebViewApp(?:\.Splash)?"', 'android:theme="@style/Theme.WebViewApp.NoSplash"', text)
-          text = re.sub(r'\n\s*<activity\b[^>]*android:name="\.SplashActivity"[\s\S]*?</activity>\s*', '\n\n', text, count=1)
-          launcher_filter = '''            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>'''
-          if 'android.intent.category.LAUNCHER' not in text:
-              text, count = re.subn(
-                  r'(<activity\b[^>]*android:name="\.MainActivity"[\s\S]*?>)',
-                  lambda m: m.group(1) + "\n" + launcher_filter,
-                  text,
-                  count=1,
-              )
-              if count != 1:
-                  raise SystemExit("Unable to attach launcher intent to MainActivity")
-          if '.SplashActivity' in text or 'Theme.WebViewApp.Splash' in text:
-              raise SystemExit("SplashActivity still present in disabled-splash manifest")
-          if text.count('android.intent.category.LAUNCHER') != 1:
-              raise SystemExit("Disabled-splash manifest must contain exactly one launcher")
-          manifest.write_text(text)
-          PY
+            cat > app/src/main/res/values-v31/themes.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.WebViewApp.Splash" parent="Theme.SplashScreen">
+                  <item name="windowSplashScreenBackground">@color/splash_bg</item>
+                  <item name="windowSplashScreenAnimatedIcon">@drawable/splash_transparent_icon</item>
+                  <item name="windowSplashScreenIconBackgroundColor">@color/splash_bg</item>
+                  <item name="windowSplashScreenAnimationDuration">0</item>
+                  <item name="postSplashScreenTheme">@style/Theme.WebViewApp</item>
+              </style>
+          </resources>
+          EOF
+          else
+            echo "Splash enabled — splash covers full window; post-splash status=theme color, nav=system default"
+            cat > app/src/main/res/values-v31/themes.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.WebViewApp.Splash" parent="Theme.SplashScreen">
+                  <item name="windowSplashScreenBackground">@color/splash_bg</item>
+                  <item name="windowSplashScreenAnimatedIcon">@android:color/transparent</item>
+                  <item name="android:windowBackground">@color/splash_bg</item>
+                  <item name="android:statusBarColor">@color/splash_bg</item>
+                  <item name="android:navigationBarColor">@color/splash_bg</item>
+                  <item name="postSplashScreenTheme">@style/Theme.WebViewApp.SplashPost</item>
+              </style>
+              <style name="Theme.WebViewApp.SplashPost" parent="Theme.WebViewApp">
+                  <item name="android:windowBackground">?android:attr/colorBackground</item>
+                  <item name="android:statusBarColor">@color/primary_dark</item>
+                  <item name="android:navigationBarColor">?android:attr/navigationBarColor</item>
+              </style>
+          </resources>
+          EOF
+            cat > app/src/main/res/values/themes.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.WebViewApp" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+                  <item name="colorPrimary">@color/primary</item>
+                  <item name="colorPrimaryDark">@color/primary_dark</item>
+                  <item name="colorAccent">@color/accent</item>
+                  <item name="android:statusBarColor">@color/primary_dark</item>
+                  <item name="android:navigationBarColor">?android:attr/navigationBarColor</item>
+              </style>
+
+              <style name="Theme.WebViewApp.Splash" parent="Theme.WebViewApp">
+                  <item name="android:windowBackground">@color/splash_bg</item>
+                  <item name="android:statusBarColor">@color/splash_bg</item>
+                  <item name="android:navigationBarColor">@color/splash_bg</item>
+              </style>
+              <style name="Theme.WebViewApp.SplashPost" parent="Theme.WebViewApp">
+                  <item name="android:statusBarColor">@color/primary_dark</item>
+                  <item name="android:navigationBarColor">?android:attr/navigationBarColor</item>
+              </style>
+          </resources>
+          EOF
           fi
+          python3 <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          ANDROID = '{http://schemas.android.com/apk/res/android}'
+          ET.register_namespace('android', 'http://schemas.android.com/apk/res/android')
+          manifest = Path('app/src/main/AndroidManifest.xml')
+          tree = ET.parse(manifest)
+          root = tree.getroot()
+          app = root.find('application')
+          splash = main = None
+          for activity in app.findall('activity'):
+              name = activity.get(ANDROID + 'name')
+              if name == '.SplashActivity':
+                  splash = activity
+              elif name == '.MainActivity':
+                  main = activity
+
+          def is_launcher_filter(intent_filter):
+              has_main = any(child.tag == 'action' and child.get(ANDROID + 'name') == 'android.intent.action.MAIN' for child in intent_filter)
+              has_launcher = any(child.tag == 'category' and child.get(ANDROID + 'name') == 'android.intent.category.LAUNCHER' for child in intent_filter)
+              return has_main and has_launcher
+
+          def remove_launcher(activity):
+              for child in list(activity):
+                  if child.tag == 'intent-filter' and is_launcher_filter(child):
+                      activity.remove(child)
+
+          def ensure_launcher(activity):
+              if any(child.tag == 'intent-filter' and is_launcher_filter(child) for child in activity):
+                  return
+              intent = ET.Element('intent-filter')
+              ET.SubElement(intent, 'action', {ANDROID + 'name': 'android.intent.action.MAIN'})
+              ET.SubElement(intent, 'category', {ANDROID + 'name': 'android.intent.category.LAUNCHER'})
+              activity.insert(0, intent)
+
+          splash_disabled = not os.environ.get('CM_SPLASH_TEXT', '').strip() and os.environ.get('CM_SPLASH_DESIGN', '').strip() in ('', 'none')
+          if splash_disabled:
+              remove_launcher(splash)
+              splash.set(ANDROID + 'exported', 'false')
+              ensure_launcher(main)
+              # MainActivity is the launcher: give it a Theme.SplashScreen-derived
+              # theme so Android 12+ doesn't show the default OS launcher icon splash.
+              main.set(ANDROID + 'theme', '@style/Theme.WebViewApp.Splash')
+          else:
+              remove_launcher(main)
+              splash.set(ANDROID + 'exported', 'true')
+              ensure_launcher(splash)
+              # Reset MainActivity theme so it inherits from <application>.
+              main.attrib.pop(ANDROID + 'theme', None)
+          tree.write(manifest, encoding='utf-8', xml_declaration=True)
+          print('Launcher activity:', 'MainActivity' if splash_disabled else 'SplashActivity')
+          PY
 
       - name: Set up app icon
         script: |
@@ -393,6 +465,30 @@ workflows:
                 ;;
             esac
           fi
+
+      - name: Verify built artifacts (signing + manifest sanity)
+        ignore_failure: true
+        script: |
+          set +e
+          echo "=== APK/AAB VERIFICATION ==="
+          BT_DIR="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/Users/builder/programs/android-sdk-macosx}}/build-tools"
+          BT_VER="$(ls "$BT_DIR" 2>/dev/null | sort -V | tail -1)"
+          APKSIGNER="$BT_DIR/$BT_VER/apksigner"
+          AAPT2="$BT_DIR/$BT_VER/aapt2"
+          echo "Using build-tools: $BT_VER"
+          for f in $(find app/build/outputs -name "*.apk" 2>/dev/null); do
+            echo "--- APK: $f ---"
+            "$APKSIGNER" verify --verbose "$f" 2>&1 | head -40
+            "$AAPT2" dump badging "$f" 2>&1 | grep -E "^(package|application-label|sdkVersion|targetSdkVersion|uses-permission)" | head -20
+            DEX_COUNT=$(unzip -l "$f" 2>/dev/null | grep -cE "classes[0-9]*\.dex$")
+            echo "dex_files=$DEX_COUNT"
+          done
+          for f in $(find app/build/outputs -name "*.aab" 2>/dev/null); do
+            echo "--- AAB: $f ($(stat -f%z "$f" 2>/dev/null || stat -c%s "$f") bytes) ---"
+            unzip -l "$f" 2>/dev/null | head -10
+          done
+          echo "=== VERIFICATION COMPLETE ==="
+          exit 0
 
     artifacts:
       - app/build/outputs/**/*.apk
