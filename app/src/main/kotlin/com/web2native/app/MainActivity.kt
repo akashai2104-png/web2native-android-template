@@ -18,10 +18,9 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.util.DisplayMetrics
 import android.util.Log
-import android.view.Gravity
+import android.util.TypedValue
 import android.view.KeyEvent
 import android.view.View
-import android.view.ViewGroup
 import android.view.WindowManager
 import android.webkit.*
 import android.view.animation.AlphaAnimation
@@ -43,8 +42,8 @@ import androidx.core.content.FileProvider
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import com.google.android.gms.ads.*
 import com.google.android.gms.ads.interstitial.InterstitialAd
 import com.google.android.gms.ads.interstitial.InterstitialAdLoadCallback
@@ -190,15 +189,37 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun isSplashDisabledAtLaunch(): Boolean {
-        val splashDesign = getBuildConfigString("SPLASH_DESIGN", "dots")
-        val splashText = getBuildConfigString("SPLASH_TEXT", "")
-        val splashEnabled = try {
-            getBuildConfigField("SPLASH_ENABLED")?.getBoolean(null) ?: (splashDesign != "none")
+    private fun getSystemNavigationBarColor(): Int {
+        return try {
+            val value = TypedValue()
+            if (theme.resolveAttribute(android.R.attr.colorBackground, value, true)) {
+                if (value.resourceId != 0) ContextCompat.getColor(this, value.resourceId) else value.data
+            } else {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) Color.WHITE else Color.BLACK
+            }
         } catch (_: Exception) {
-            splashDesign != "none"
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) Color.WHITE else Color.BLACK
         }
-        return !splashEnabled || (splashDesign == "none" && splashText.isBlank())
+    }
+
+    /**
+     * Apply the OS's true system-default navigation bar:
+     * - transparent nav bar (so the OS draws its own background / gesture pill)
+     * - contrast enforcement on Q+ so icons/pill stay legible over app content
+     * - light/dark icon appearance follows the device's current UI mode
+     * Required for edge-to-edge with FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS.
+     */
+    private fun applySystemDefaultNavBar() {
+        try {
+            window.navigationBarColor = Color.TRANSPARENT
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                window.isNavigationBarContrastEnforced = true
+            }
+            val nightMode = resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK
+            val isDark = nightMode == android.content.res.Configuration.UI_MODE_NIGHT_YES
+            val controller = WindowCompat.getInsetsController(window, window.decorView)
+            controller.isAppearanceLightNavigationBars = !isDark
+        } catch (_: Exception) { }
     }
 
 
@@ -286,8 +307,10 @@ class MainActivity : AppCompatActivity() {
     private fun applyBrandingVisibility(brandingWatermark: TextView?, show: Boolean) {
         if (brandingWatermark == null) return
         if (show) {
-            val brandThemeColor = try { Color.parseColor(BuildConfig.THEME_COLOR) } catch (_: Exception) { Color.parseColor("#1D4ED8") }
-            brandingWatermark.setBackgroundColor(brandThemeColor)
+            // Branding bar is always brand blue with white text, independent of the
+            // user-selected theme/status-bar color. Free-tier only.
+            brandingWatermark.setBackgroundColor(Color.parseColor("#1D4ED8"))
+            brandingWatermark.setTextColor(Color.WHITE)
             brandingWatermark.visibility = View.VISIBLE
             brandingWatermark.setOnClickListener {
                 openInChromeCustomTab("https://nativeappai.com", "branding")
@@ -1056,7 +1079,124 @@ class MainActivity : AppCompatActivity() {
      * - External OAuth URLs → Chrome Custom Tab
      * - External URLs → Chrome Custom Tab
      */
+    // ─────────────── Cross-device compatibility helpers ───────────────
+
+    private fun isWebViewProviderAvailable(): Boolean {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                WebView.getCurrentWebViewPackage() != null
+            } else true
+        } catch (_: Throwable) { false }
+    }
+
+    private fun showWebViewMissingScreen() {
+        try {
+            val container = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = android.view.Gravity.CENTER
+                setPadding(48, 48, 48, 48)
+                setBackgroundColor(Color.WHITE)
+            }
+            val title = TextView(this).apply {
+                text = "Update required"
+                textSize = 22f
+                setTextColor(Color.parseColor("#0F172A"))
+                setPadding(0, 0, 0, 24)
+                gravity = android.view.Gravity.CENTER
+            }
+            val body = TextView(this).apply {
+                text = "This app needs Android System WebView to run. Please install or update it from the Play Store, then reopen the app."
+                textSize = 15f
+                setTextColor(Color.parseColor("#475569"))
+                gravity = android.view.Gravity.CENTER
+                setPadding(0, 0, 0, 32)
+            }
+            val btn = TextView(this).apply {
+                text = "Open Play Store"
+                textSize = 15f
+                setTextColor(Color.WHITE)
+                setBackgroundColor(Color.parseColor("#1D4ED8"))
+                setPadding(48, 24, 48, 24)
+                setOnClickListener {
+                    try {
+                        startActivity(Intent(
+                            Intent.ACTION_VIEW,
+                            Uri.parse("market://details?id=com.google.android.webview")
+                        ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) })
+                    } catch (_: Throwable) {
+                        try {
+                            startActivity(Intent(
+                                Intent.ACTION_VIEW,
+                                Uri.parse("https://play.google.com/store/apps/details?id=com.google.android.webview")
+                            ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) })
+                        } catch (_: Throwable) { }
+                    }
+                }
+            }
+            container.addView(title)
+            container.addView(body)
+            container.addView(btn)
+            setContentView(container)
+        } catch (_: Throwable) {
+            finish()
+        }
+    }
+
+    /**
+     * Handle non-http(s) schemes that the WebView can't load and CCT can't open.
+     * Returns true when the URL was consumed (and the caller should NOT load it).
+     */
+    private fun handleSpecialScheme(url: String): Boolean {
+        if (url.isEmpty()) return false
+        val lower = url.lowercase()
+        if (lower.startsWith("intent://") || lower.startsWith("intent:")) {
+            return try {
+                val intent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME)
+                val fallback = intent.getStringExtra("browser_fallback_url")
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                if (intent.resolveActivity(packageManager) != null) {
+                    startActivity(intent)
+                } else if (!fallback.isNullOrEmpty()) {
+                    if (::webView.isInitialized) webView.loadUrl(fallback)
+                }
+                true
+            } catch (t: Throwable) {
+                Log.w("W2N_SCHEME", "intent:// parse failed: ${t.message}")
+                true
+            }
+        }
+        val isSpecial = lower.startsWith("tel:") || lower.startsWith("sms:") ||
+            lower.startsWith("mailto:") || lower.startsWith("geo:") ||
+            lower.startsWith("market:") || lower.startsWith("whatsapp:") ||
+            lower.startsWith("upi:") || lower.startsWith("tg:") ||
+            lower.startsWith("fb-messenger:") || lower.startsWith("zoomus:") ||
+            lower.startsWith("skype:") || lower.startsWith("paytmmp:") ||
+            lower.startsWith("phonepe:") || lower.startsWith("gpay:")
+        if (!isSpecial) return false
+        return try {
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            if (intent.resolveActivity(packageManager) != null) {
+                startActivity(intent)
+            } else {
+                Toast.makeText(this, "No app available to open this link", Toast.LENGTH_SHORT).show()
+            }
+            true
+        } catch (t: Throwable) {
+            Log.w("W2N_SCHEME", "Failed to launch scheme: ${t.message}")
+            true
+        }
+    }
+
     private fun shouldOverrideNavigation(url: String): Boolean {
+
+        // ── Special schemes (tel:, mailto:, sms:, intent:, whatsapp:, upi:, etc.) ──
+        // These can never be loaded by a WebView or by Chrome Custom Tabs, so handle
+        // them explicitly with ACTION_VIEW. Without this, taps on phone-number /
+        // email / WhatsApp links silently do nothing on every device.
+        if (handleSpecialScheme(url)) return true
+
         val uri = Uri.parse(url)
         val host = uri.host?.lowercase() ?: ""
         val baseHost = Uri.parse(BuildConfig.WEBSITE_URL).host
@@ -1284,146 +1424,160 @@ class MainActivity : AppCompatActivity() {
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
-        val splashDisabledAtLaunch = isSplashDisabledAtLaunch()
-        if (splashDisabledAtLaunch) {
-            setTheme(R.style.Theme_WebViewApp_NoSplash)
-        }
-
+        // === SPLASH-OFF: install Android 12+ SplashScreen to swap to Material theme ===
+        // When splash is disabled, MainActivity is the launcher and its manifest theme is
+        // Theme.WebViewApp.Splash (extends Theme.SplashScreen, NOT Material). Without
+        // installSplashScreen() the post-splash theme never applies and AppCompatActivity
+        // crashes with "You need to use a Theme.AppCompat theme (or descendant)".
+        try {
+            val sd = try { BuildConfig.SPLASH_DESIGN } catch (_: Exception) { "dots" }
+            val splashOff = BuildConfig.SPLASH_TEXT.isEmpty() && (sd.isEmpty() || sd == "none")
+            if (splashOff) {
+                installSplashScreen()
+            }
+        } catch (_: Throwable) { /* best effort */ }
         super.onCreate(savedInstanceState)
 
-        // Resolve theme color before inflating content so system bars never inherit
-        // the white NoSplash/startup window background.
-        val themeColor = try {
-            Color.parseColor(BuildConfig.THEME_COLOR)
-        } catch (e: Exception) {
-            Color.parseColor("#1D4ED8")
-        }
-        val themeLuminance = (0.299 * Color.red(themeColor) + 0.587 * Color.green(themeColor) + 0.114 * Color.blue(themeColor)) / 255.0
-        val isThemeLight = themeLuminance > 0.6
-        val splashDesign = getBuildConfigString("SPLASH_DESIGN", "dots")
-        val splashText = getBuildConfigString("SPLASH_TEXT", "")
-        val splashEnabled = try {
-            getBuildConfigField("SPLASH_ENABLED")?.getBoolean(null) ?: (splashDesign != "none")
-        } catch (_: Exception) {
-            splashDesign != "none"
-        }
-        val splashActive = splashEnabled && !splashDisabledAtLaunch && (splashText.isNotEmpty() || (splashDesign.isNotEmpty() && splashDesign != "none"))
-        val splashBgColor = if (splashActive) {
-            val configuredSplashColor = getBuildConfigString("SPLASH_COLOR", "")
-            if (configuredSplashColor.isNotEmpty()) {
-                try { Color.parseColor(configuredSplashColor) } catch (_: Exception) { themeColor }
-            } else {
-                themeColor
-            }
-        } else {
-            themeColor
-        }
-        val splashBgLuminance = (0.299 * Color.red(splashBgColor) + 0.587 * Color.green(splashBgColor) + 0.114 * Color.blue(splashBgColor)) / 255.0
-        val isSplashBgLight = splashBgLuminance > 0.6
-
-        // During the SplashActivity -> MainActivity hand-off, never paint the
-        // MainActivity starting window with the splash/status-bar colour. That
-        // was the extra full-screen colour frame seen between splash content
-        // and the first WebView frame. Keep the hand-off surface neutral; bar
-        // colours are applied after the real layout is inflated.
-        if (splashActive) {
-            window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
-            @Suppress("DEPRECATION")
-            window.clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS or WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION)
-            window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.WHITE))
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                window.isStatusBarContrastEnforced = false
-                window.isNavigationBarContrastEnforced = false
-            }
-        } else if (splashDisabledAtLaunch || BuildConfig.FULL_SCREEN) {
-            window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
-            @Suppress("DEPRECATION")
-            window.clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS or WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION)
-            WindowCompat.setDecorFitsSystemWindows(window, false)
-            if (BuildConfig.FULL_SCREEN) {
-                window.statusBarColor = Color.TRANSPARENT
-                window.navigationBarColor = Color.TRANSPARENT
-            } else {
-                window.statusBarColor = themeColor
-                window.navigationBarColor = Color.BLACK
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    window.isStatusBarContrastEnforced = false
-                    window.isNavigationBarContrastEnforced = false
-                }
-                WindowInsetsControllerCompat(window, window.decorView).apply {
-                    isAppearanceLightStatusBars = isThemeLight
-                    isAppearanceLightNavigationBars = false
-                }
-            }
+        // === SPLASH-ON HANDOFF ===
+        // If a custom splash is configured, paint the entire window (background +
+        // status + nav bars) with the splash color BEFORE inflating the layout, so
+        // the user never sees a theme-color flash between SplashActivity and the
+        // first WebView paint. Splash-off path is untouched (splashActiveEarly==false).
+        val splashDesignEarly = try { BuildConfig.SPLASH_DESIGN } catch (_: Exception) { "dots" }
+        val splashActiveEarly = BuildConfig.SPLASH_TEXT.isNotEmpty() ||
+            (splashDesignEarly.isNotEmpty() && splashDesignEarly != "none")
+        val splashBgColorEarly: Int = if (splashActiveEarly) {
+            val splashColorStr = try { BuildConfig.SPLASH_COLOR } catch (_: Exception) { "" }
+            val themeColorEarly = try { Color.parseColor(BuildConfig.THEME_COLOR) } catch (_: Exception) { Color.parseColor("#1D4ED8") }
+            if (splashColorStr.isNotEmpty()) {
+                try { Color.parseColor(splashColorStr) } catch (_: Exception) { themeColorEarly }
+            } else themeColorEarly
+        } else 0
+        if (splashActiveEarly) {
+            try {
+                window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(splashBgColorEarly))
+                window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
+                window.statusBarColor = splashBgColorEarly
+                // Navigation bar: keep system default (do NOT paint).
+                applySystemDefaultNavBar()
+                val lum = (0.299 * Color.red(splashBgColorEarly) + 0.587 * Color.green(splashBgColorEarly) + 0.114 * Color.blue(splashBgColorEarly)) / 255.0
+                val lightBg = lum > 0.5
+                val controller = WindowCompat.getInsetsController(window, window.decorView)
+                controller.isAppearanceLightStatusBars = lightBg
+            } catch (_: Exception) { }
         }
 
-        if (splashDisabledAtLaunch) {
-            window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(themeColor))
+        // Detect missing/disabled Android System WebView before we touch any WebView API.
+        // On Huawei (no-GMS) and some heavily-modded ROMs the WebView provider can be null;
+        // creating a WebView in that state crashes. Show a friendly recovery screen instead.
+        if (!isWebViewProviderAvailable()) {
+            showWebViewMissingScreen()
+            return
         }
+
         setContentView(R.layout.activity_main)
 
-        if (splashActive && !BuildConfig.FULL_SCREEN) {
-            window.statusBarColor = if (BuildConfig.SHOW_APP_BAR) themeColor else Color.WHITE
-            window.navigationBarColor = Color.BLACK
-            WindowInsetsControllerCompat(window, window.decorView).apply {
-                isAppearanceLightStatusBars = !BuildConfig.SHOW_APP_BAR
-                isAppearanceLightNavigationBars = false
-            }
+        // Handle system bar insets — works consistently on Android 10–16, including
+        // Android 15+ which forces edge-to-edge regardless of setDecorFitsSystemWindows.
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        val rootContentForInsets = findViewById<RelativeLayout>(R.id.rootContent)
+        val statusBarBgView = findViewById<View>(R.id.statusBarBg)
+        // Compute the color we want to paint behind the status bar (theme or splash).
+        val themeColorForBars = try {
+            Color.parseColor(BuildConfig.THEME_COLOR)
+        } catch (_: Exception) {
+            Color.parseColor("#1D4ED8")
         }
-
-        // Scrim views and edge-to-edge inset handling are only required for
-        // the splash-disabled and full-screen paths. With splash enabled the
-        // standard window/system-bar behaviour is preserved.
+        val statusBarBandColor = themeColorForBars
         if (BuildConfig.FULL_SCREEN) {
-            val rootContent = findViewById<RelativeLayout>(R.id.rootContent)
-            ViewCompat.setOnApplyWindowInsetsListener(rootContent) { view, _ ->
+            ViewCompat.setOnApplyWindowInsetsListener(rootContentForInsets) { view, _ ->
                 view.setPadding(0, 0, 0, 0)
                 WindowInsetsCompat.CONSUMED
             }
-        } else if (splashDisabledAtLaunch) {
-            val initialStatusBarHeight = resources.getIdentifier("status_bar_height", "dimen", "android")
-                .takeIf { it > 0 }
-                ?.let { resources.getDimensionPixelSize(it) }
-                ?: 0
-            val initialNavBarHeight = resources.getIdentifier("navigation_bar_height", "dimen", "android")
-                .takeIf { it > 0 }
-                ?.let { resources.getDimensionPixelSize(it) }
-                ?: 0
-            val contentRoot = findViewById<ViewGroup>(android.R.id.content)
-            val statusScrim = View(this).apply { setBackgroundColor(themeColor) }
-            val navScrim = View(this).apply { setBackgroundColor(Color.BLACK) }
-            contentRoot.addView(
-                statusScrim,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT, initialStatusBarHeight, Gravity.TOP
-                )
-            )
-            contentRoot.addView(
-                navScrim,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT, initialNavBarHeight, Gravity.BOTTOM
-                )
-            )
-
-            statusScrim.bringToFront()
-            navScrim.bringToFront()
-
-            val rootContent = findViewById<RelativeLayout>(R.id.rootContent)
-            ViewCompat.setOnApplyWindowInsetsListener(contentRoot) { _, insets ->
-                val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-                rootContent.setPadding(0, bars.top, 0, bars.bottom)
-                (statusScrim.layoutParams as FrameLayout.LayoutParams).height = bars.top
-                (navScrim.layoutParams as FrameLayout.LayoutParams).height = bars.bottom
-                statusScrim.requestLayout()
-                navScrim.requestLayout()
+            // No status bar band in immersive mode.
+            statusBarBgView?.let {
+                val lp = it.layoutParams
+                lp.height = 0
+                it.layoutParams = lp
+            }
+        } else {
+            // Pad rootContent so app UI sits between status bar and nav bar on every device.
+            // Add IME inset to bottom so the keyboard pushes content up (works with adjustResize).
+            ViewCompat.setOnApplyWindowInsetsListener(rootContentForInsets) { view, insets ->
+                val sys = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+                val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+                view.setPadding(sys.left, sys.top, sys.right, maxOf(sys.bottom, ime.bottom))
+                // Resize the status-bar background band to match the actual top inset
+                // and paint it with the user-selected color. This guarantees the color
+                // is visible on Android 15+ where window.statusBarColor is ignored.
+                statusBarBgView?.let { bg ->
+                    val lp = bg.layoutParams
+                    if (lp.height != sys.top) {
+                        lp.height = sys.top
+                        bg.layoutParams = lp
+                    }
+                    bg.setBackgroundColor(statusBarBandColor)
+                }
                 WindowInsetsCompat.CONSUMED
             }
-            ViewCompat.requestApplyInsets(contentRoot)
+        }
 
-            WindowInsetsControllerCompat(window, window.decorView).apply {
-                isAppearanceLightStatusBars = isThemeLight
-                isAppearanceLightNavigationBars = false
-            }
+        // === Runtime BuildConfig verification ===
+        Log.i("APP_CONFIG", "=== BUILDCONFIG VALUES AT RUNTIME ===")
+        Log.i("APP_CONFIG", "SHOW_APP_BAR=" + BuildConfig.SHOW_APP_BAR)
+        Log.i("APP_CONFIG", "FULL_SCREEN=" + BuildConfig.FULL_SCREEN)
+        Log.i("APP_CONFIG", "SPLASH_TEXT=" + BuildConfig.SPLASH_TEXT)
+        Log.i("APP_CONFIG", "SPLASH_ANIMATION=" + BuildConfig.SPLASH_ANIMATION)
+        try { Log.i("APP_CONFIG", "SPLASH_DESIGN=" + BuildConfig.SPLASH_DESIGN) } catch (e: Exception) { Log.i("APP_CONFIG", "SPLASH_DESIGN=MISSING") }
+        try { Log.i("APP_CONFIG", "SPLASH_COLOR=" + BuildConfig.SPLASH_COLOR) } catch (e: Exception) { Log.i("APP_CONFIG", "SPLASH_COLOR=MISSING") }
+        Log.i("APP_CONFIG", "PROJECT_ID=" + BuildConfig.PROJECT_ID)
+        Log.i("APP_CONFIG", "API_BASE_URL length=" + BuildConfig.API_BASE_URL.length)
+        Log.i("APP_CONFIG", "SUPABASE_ANON_KEY length=" + BuildConfig.SUPABASE_ANON_KEY.length)
+        Log.i("APP_CONFIG", "THEME_COLOR=" + BuildConfig.THEME_COLOR)
+        Log.i("APP_CONFIG", "WEBSITE_URL=" + BuildConfig.WEBSITE_URL)
+        Log.i("APP_CONFIG", "APPLICATION_ID=" + BuildConfig.APPLICATION_ID)
+        Log.i("APP_CONFIG", "VERSION_NAME=" + BuildConfig.VERSION_NAME)
+        Log.i("APP_CONFIG", "=== END BUILDCONFIG VALUES ===")
+
+        // Register file chooser result handler
+        fileChooserLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val results = if (result.resultCode == Activity.RESULT_OK) {
+                val dataUri = result.data?.data
+                if (dataUri != null) {
+                    arrayOf(dataUri)
+                } else if (cameraPhotoPath != null) {
+                    arrayOf(Uri.parse(cameraPhotoPath))
+                } else null
+            } else null
+            fileUploadCallback?.onReceiveValue(results ?: arrayOf())
+            fileUploadCallback = null
+        }
+
+        // Apply dynamic theme color to status bar (legacy fallback for <Android 15).
+        // Navigation bar is left to the OS (transparent + contrast enforced) so it matches system default.
+        val themeColor = themeColorForBars
+        window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
+        if (BuildConfig.FULL_SCREEN) {
+            window.statusBarColor = Color.TRANSPARENT
+            window.navigationBarColor = Color.TRANSPARENT
+        } else if (splashActiveEarly) {
+            // Post-splash: status bar must switch to the user-selected theme color immediately.
+            window.statusBarColor = themeColor
+            applySystemDefaultNavBar()
+            try {
+                val themeLum = (0.299 * Color.red(themeColor) + 0.587 * Color.green(themeColor) + 0.114 * Color.blue(themeColor)) / 255.0
+                val controller = WindowCompat.getInsetsController(window, window.decorView)
+                controller.isAppearanceLightStatusBars = themeLum > 0.5
+            } catch (_: Exception) { }
+        } else {
+            window.statusBarColor = themeColor
+            applySystemDefaultNavBar()
+            try {
+                val themeLum = (0.299 * Color.red(themeColor) + 0.587 * Color.green(themeColor) + 0.114 * Color.blue(themeColor)) / 255.0
+                val lightBg = themeLum > 0.5
+                val controller = WindowCompat.getInsetsController(window, window.decorView)
+                controller.isAppearanceLightStatusBars = lightBg
+            } catch (_: Exception) { }
         }
 
         // Apply orientation lock
@@ -1440,6 +1594,14 @@ class MainActivity : AppCompatActivity() {
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
             )
+            // Render into display cutout area on Android 9+ for consistent edge-to-edge across notched devices
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                try {
+                    val lp = window.attributes
+                    lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                    window.attributes = lp
+                } catch (_: Exception) { }
+            }
             applyFullScreenMode()
         }
 
@@ -1480,7 +1642,8 @@ class MainActivity : AppCompatActivity() {
             trialOverlayManager.checkTrialStatus()
         }, 2000)
 
-        val splashDisabled = splashDisabledAtLaunch || !splashActive
+        val splashDesign = try { BuildConfig.SPLASH_DESIGN } catch (_: Exception) { "dots" }
+        val splashActive = BuildConfig.SPLASH_TEXT.isNotEmpty() || (splashDesign.isNotEmpty() && splashDesign != "none")
 
         Log.i("APP_CONFIG", "Header decision: SHOW_APP_BAR=${BuildConfig.SHOW_APP_BAR}, FULL_SCREEN=${BuildConfig.FULL_SCREEN}, result=${if (BuildConfig.SHOW_APP_BAR && !BuildConfig.FULL_SCREEN) "VISIBLE" else "GONE"}")
 
@@ -1516,35 +1679,36 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Splash-off must not show any native interstitial screen. Reveal the
+        // WebView immediately and keep the loading overlay hidden.
         val loadingIcon = findViewById<ImageView>(R.id.loadingIcon)
         val loadingSpinner = findViewById<ProgressBar>(R.id.loadingSpinner)
-
-        if (splashDisabled) {
-            // Universal disabled-splash behaviour: no branded overlay on any
-            // Android version. WebView is visible from the first frame with a
-            // white background so the website's own splash (or page) is the
-            // first real thing the user sees.
-            loadingOverlay?.visibility = View.GONE
+        if (splashActive) {
+            // Plain splash-colored cover until the page is fully loaded.
+            // No icon, no spinner — the splash stays visually identical to
+            // SplashActivity, then we cut directly to the rendered app.
+            loadingOverlay?.setBackgroundColor(splashBgColorEarly)
+            (loadingOverlay?.layoutParams as? RelativeLayout.LayoutParams)?.let { params ->
+                params.removeRule(RelativeLayout.BELOW)
+                params.addRule(RelativeLayout.ALIGN_PARENT_TOP)
+                loadingOverlay?.layoutParams = params
+            }
+            loadingOverlay?.visibility = View.VISIBLE
             loadingIcon?.visibility = View.GONE
             loadingSpinner?.visibility = View.GONE
-            webView.setBackgroundColor(Color.WHITE)
-            webView.visibility = View.VISIBLE
-            window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(themeColor))
-            Log.i("APP_CONFIG", "Splash disabled — overlay GONE, WebView visible white")
+            Log.i("APP_CONFIG", "Loading overlay: full-screen splash bg until full page load")
         } else {
-            // Splash enabled: SplashActivity already showed branded splash. Do
-            // NOT paint a full-screen brand overlay here — that produced an
-            // extra "status-bar-colour full-screen" frame between SplashActivity
-            // finishing and the WebView's first paint. WebView is visible from
-            // the first MainActivity frame without a full-screen theme-colour
-            // frame between splash and the website.
+            loadingOverlay?.clearAnimation()
             loadingOverlay?.visibility = View.GONE
             loadingIcon?.visibility = View.GONE
             loadingSpinner?.visibility = View.GONE
-            webView.setBackgroundColor(Color.WHITE)
             webView.visibility = View.VISIBLE
-            Log.i("APP_CONFIG", "Splash active — overlay GONE, WebView visible immediately")
+            Log.i("APP_CONFIG", "Loading overlay: GONE (splash disabled)")
         }
+
+        // Keep the WebView background matching the splash so any pre-paint
+        // frame stays seamless; splash-off goes straight to transparent.
+        webView.setBackgroundColor(if (splashActive) splashBgColorEarly else Color.TRANSPARENT)
 
         Log.i("APP_CONFIG", "splashActive=$splashActive, splashDesign=$splashDesign")
 
@@ -1577,7 +1741,11 @@ class MainActivity : AppCompatActivity() {
             // Offline caching strategy
             databaseEnabled = true
             cacheMode = WebSettings.LOAD_CACHE_ELSE_NETWORK
+            // Speed up first paint
+            @Suppress("DEPRECATION")
+            setRenderPriority(WebSettings.RenderPriority.HIGH)
         }
+        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
 
         // JavaScript bridge — allows websites to detect native app
         webView.addJavascriptInterface(WebToNativeBridge(), "WebToNative")
@@ -1608,6 +1776,22 @@ class MainActivity : AppCompatActivity() {
                 val url = request?.url?.toString() ?: return false
                 Log.d("W2N_NAV", "WebViewClient.shouldOverrideUrlLoading: $url")
                 return shouldOverrideNavigation(url)
+            }
+
+            override fun onPageCommitVisible(view: WebView?, url: String?) {
+                super.onPageCommitVisible(view, url)
+                // Splash-off: reveal WebView at first paint (legacy behavior).
+                // Splash-on: keep the splash-colored overlay until onPageFinished
+                // so the user goes straight from splash to the fully-rendered app.
+                if (!splashActiveEarly && !pageLoaded) {
+                    pageLoaded = true
+                    webView.visibility = View.VISIBLE
+                    webView.setBackgroundColor(Color.TRANSPARENT)
+                    loadingOverlay?.let { overlay ->
+                        overlay.clearAnimation()
+                        overlay.visibility = View.GONE
+                    }
+                }
             }
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
@@ -1720,16 +1904,40 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
-                // Reveal WebView and fade out loading overlay
+                // Reveal WebView and hide loading overlay
                 if (!pageLoaded) {
                     pageLoaded = true
                     webView.visibility = View.VISIBLE
                     webView.setBackgroundColor(Color.TRANSPARENT)
                     loadingOverlay?.let { overlay ->
                         if (overlay.visibility == View.VISIBLE) {
-                            val fadeOut = AlphaAnimation(1f, 0f).apply { duration = 300; fillAfter = true }
-                            overlay.startAnimation(fadeOut)
-                            overlay.postDelayed({ overlay.visibility = View.GONE }, 300)
+                            if (splashActiveEarly) {
+                                // Splash-on: cut directly to the app — no fade
+                                // (a fade would expose the themeColor toolbar
+                                // underneath for the duration of the animation).
+                                overlay.clearAnimation()
+                                overlay.visibility = View.GONE
+                                if (!BuildConfig.FULL_SCREEN) {
+                                    try {
+                                        window.statusBarColor = themeColor
+                                        val themeLum = (0.299 * Color.red(themeColor) + 0.587 * Color.green(themeColor) + 0.114 * Color.blue(themeColor)) / 255.0
+                                        val controller = WindowCompat.getInsetsController(window, window.decorView)
+                                        controller.isAppearanceLightStatusBars = themeLum > 0.5
+                                        // Repaint the status-bar background band so Android 15+
+                                        // shows the theme color (not the leftover splash color).
+                                        findViewById<View>(R.id.statusBarBg)?.setBackgroundColor(themeColor)
+                                        // Clear the splash window background without replacing it with
+                                        // theme color. On Android 15+ the nav bar is transparent/edge-to-edge,
+                                        // so any opaque window background becomes the visible nav-bar band.
+                                        window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
+                                        applySystemDefaultNavBar()
+                                    } catch (_: Exception) { }
+                                }
+                            } else {
+                                val fadeOut = AlphaAnimation(1f, 0f).apply { duration = 300; fillAfter = true }
+                                overlay.startAnimation(fadeOut)
+                                overlay.postDelayed({ overlay.visibility = View.GONE }, 300)
+                            }
                         }
                     }
                     checkForAppUpdate()
@@ -1755,6 +1963,21 @@ class MainActivity : AppCompatActivity() {
         }
 
         webView.webChromeClient = object : WebChromeClient() {
+            // HTML5 Geolocation: forward to OS so "use my location" features work.
+            override fun onGeolocationPermissionsShowPrompt(
+                origin: String?,
+                callback: android.webkit.GeolocationPermissions.Callback?
+            ) {
+                if (callback == null || origin == null) return
+                val hasFine = ContextCompat.checkSelfPermission(
+                    this@MainActivity, Manifest.permission.ACCESS_FINE_LOCATION
+                ) == PackageManager.PERMISSION_GRANTED
+                val hasCoarse = ContextCompat.checkSelfPermission(
+                    this@MainActivity, Manifest.permission.ACCESS_COARSE_LOCATION
+                ) == PackageManager.PERMISSION_GRANTED
+                callback.invoke(origin, hasFine || hasCoarse, false)
+            }
+
             override fun onProgressChanged(view: WebView?, newProgress: Int) {
                 if (!pageLoaded) {
                     if (newProgress < 100) {
@@ -1998,10 +2221,36 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun initAdMob() {
-        MobileAds.initialize(this) { initStatus ->
-            Log.d("W2N_ADMOB", "AdMob initialized: $initStatus")
+        // Skip Play Services Ads entirely when no real ad units are configured.
+        // This is the case for free-tier wrapper builds and removes a whole class
+        // of startup crashes on devices with outdated/partial Play Services
+        // (e.g. Android Go devices like the Redmi A5).
+        val hasAnyAdUnit = BuildConfig.ADMOB_BANNER_ID.isNotEmpty() ||
+            BuildConfig.ADMOB_INTERSTITIAL_ID.isNotEmpty() ||
+            rewardedAdUnitIdCompat.isNotEmpty()
+        if (!hasAnyAdUnit) {
+            Log.d("W2N_ADMOB", "AdMob init skipped: no ad units configured")
+            return
         }
 
+        // Defer the heavy SDK init slightly so the WebView gets to paint first
+        // on slow devices — prevents a startup-time OOM/jank window.
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            try {
+                MobileAds.initialize(this) { initStatus ->
+                    Log.d("W2N_ADMOB", "AdMob initialized: $initStatus")
+                }
+            } catch (t: Throwable) {
+                Log.w("W2N_ADMOB", "MobileAds.initialize failed safely: ${t.javaClass.simpleName}: ${t.message}")
+                return@postDelayed
+            }
+            try { setupAdMobUnits() } catch (t: Throwable) {
+                Log.w("W2N_ADMOB", "AdMob unit setup failed safely: ${t.javaClass.simpleName}: ${t.message}")
+            }
+        }, 1500L)
+    }
+
+    private fun setupAdMobUnits() {
         if (BuildConfig.ADMOB_BANNER_ID.isNotEmpty()) {
             val adView = AdView(this)
             // Use adaptive banner for better sizing
@@ -2309,6 +2558,20 @@ class MainActivity : AppCompatActivity() {
         if (hasFocus && BuildConfig.FULL_SCREEN) {
             applyFullScreenMode()
         }
+    }
+
+    // Re-apply orientation + immersive on rotation, fold/unfold, multi-window, density changes
+    // so behavior stays consistent across devices and Android versions.
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        try {
+            requestedOrientation = when (BuildConfig.ORIENTATION) {
+                "portrait" -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                "landscape" -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                else -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            }
+            if (BuildConfig.FULL_SCREEN) applyFullScreenMode()
+        } catch (_: Exception) { }
     }
 
     companion object {
