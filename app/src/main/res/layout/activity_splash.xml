@@ -17,11 +17,16 @@
         android:paddingHorizontal="32dp"
         android:layout_marginBottom="60dp">
 
-        <!-- App icon -->
+        <!-- App icon — responsive: caps at 220dp on normal phones, scales down
+             gracefully on 320dp / split-screen / foldable inner displays. -->
         <ImageView
             android:id="@+id/splashIcon"
-            android:layout_width="220dp"
-            android:layout_height="220dp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:maxWidth="220dp"
+            android:maxHeight="220dp"
+            android:minWidth="120dp"
+            android:minHeight="120dp"
             android:src="@mipmap/ic_launcher_round"
             android:contentDescription="App icon"
             android:layout_marginBottom="28dp"
