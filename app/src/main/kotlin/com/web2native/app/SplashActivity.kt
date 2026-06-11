@@ -25,6 +25,7 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import java.net.HttpURLConnection
 import java.net.URL
 import org.json.JSONObject
@@ -33,21 +34,17 @@ import org.json.JSONObject
 class SplashActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        val splashDesign = try { BuildConfig.SPLASH_DESIGN } catch (_: Exception) { "dots" }
-        val splashEnabled = try { BuildConfig.SPLASH_ENABLED } catch (_: Exception) { splashDesign != "none" }
-        val splashText = try { BuildConfig.SPLASH_TEXT } catch (_: Exception) { "" }
-        val splashDisabledAtLaunch = !splashEnabled || (splashDesign == "none" && splashText.isBlank())
-
-        if (splashDisabledAtLaunch) {
-            splashDisabled = true
-            setTheme(R.style.Theme_WebViewApp_NoSplash)
-            super.onCreate(savedInstanceState)
-            window.setBackgroundDrawable(ColorDrawable(Color.WHITE))
-            startMainActivity()
-            return
+        // Android 12+: SplashActivity uses Theme.SplashScreen-derived theme. We must
+        // call installSplashScreen() before super.onCreate() so the framework swaps
+        // to postSplashScreenTheme (Material). Without this, AppCompatActivity crashes
+        // on stricter OEM ROMs (Samsung One UI, MIUI, Realme, Tecno).
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            try { installSplashScreen() } catch (_: Throwable) { }
         }
-
         super.onCreate(savedInstanceState)
+
+        val splashText = BuildConfig.SPLASH_TEXT
+        val splashDesign = try { BuildConfig.SPLASH_DESIGN } catch (_: Exception) { "dots" }
 
         Log.i("SPLASH_CONFIG", "=== SPLASH BUILDCONFIG ===")
         Log.i("SPLASH_CONFIG", "SPLASH_TEXT=" + splashText)
@@ -78,8 +75,26 @@ class SplashActivity : AppCompatActivity() {
             // Apply background to window BEFORE inflating layout to avoid white flash
             window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
             window.statusBarColor = bgColor
-            window.navigationBarColor = bgColor
+            // Navigation bar: keep system default (do NOT paint).
+            window.navigationBarColor = Color.TRANSPARENT
             window.setBackgroundDrawable(ColorDrawable(bgColor))
+
+            // Apply orientation lock during splash to match MainActivity (prevents rotation flash on tablets/foldables)
+            requestedOrientation = when (try { BuildConfig.ORIENTATION } catch (_: Exception) { "" }) {
+                "portrait" -> android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                "landscape" -> android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                else -> android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            }
+
+            // Toggle light/dark status-bar icons based on splash background luminance
+            // so status icons remain visible on light splash colors (white, yellow, etc.)
+            try {
+                val bgLuminance = (0.299 * Color.red(bgColor) + 0.587 * Color.green(bgColor) + 0.114 * Color.blue(bgColor)) / 255.0
+                val lightBg = bgLuminance > 0.5
+                androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, true)
+                val controller = androidx.core.view.WindowCompat.getInsetsController(window, window.decorView)
+                controller.isAppearanceLightStatusBars = lightBg
+            } catch (_: Exception) { }
 
             setContentView(R.layout.activity_splash)
 
@@ -172,14 +187,63 @@ class SplashActivity : AppCompatActivity() {
                 }
             }
 
-            // The splash content must be present on the first drawn activity
-            // frame. Entry animations made Android show a plain splash-colour
-            // frame first, then the icon/text, which feels like two screens.
-            iconView.alpha = 1f
-            iconView.scaleX = 1f
-            iconView.scaleY = 1f
-            textView.alpha = 1f
-            textView.translationY = 0f
+            // Set initial alpha for animations — loader starts visible immediately
+            // to ensure it's seen within the 3s splash window
+            iconView.alpha = 0f
+            iconView.scaleX = 0.3f
+            iconView.scaleY = 0.3f
+            textView.alpha = 0f
+            textView.translationY = 30f
+
+            val animationStyle = BuildConfig.SPLASH_ANIMATION
+
+            when (animationStyle) {
+                "fade" -> {
+                    val iconAlpha = ObjectAnimator.ofFloat(iconView, "alpha", 0f, 1f).apply { duration = 800 }
+                    val textAlpha = ObjectAnimator.ofFloat(textView, "alpha", 0f, 1f).apply { duration = 800; startDelay = 200 }
+                    val textSlide = ObjectAnimator.ofFloat(textView, "translationY", 0f, 0f).apply { duration = 1 }
+                    AnimatorSet().apply { playTogether(listOf(iconAlpha, textAlpha, textSlide)); start() }
+                }
+                "slide-up" -> {
+                    val iconAlpha = ObjectAnimator.ofFloat(iconView, "alpha", 0f, 1f).apply { duration = 600 }
+                    val iconSlide = ObjectAnimator.ofFloat(iconView, "translationY", 200f, 0f).apply {
+                        duration = 600; interpolator = AccelerateDecelerateInterpolator()
+                    }
+                    val textAlpha = ObjectAnimator.ofFloat(textView, "alpha", 0f, 1f).apply { startDelay = 150; duration = 600 }
+                    val textSlide = ObjectAnimator.ofFloat(textView, "translationY", 150f, 0f).apply {
+                        startDelay = 150; duration = 600; interpolator = AccelerateDecelerateInterpolator()
+                    }
+                    AnimatorSet().apply { playTogether(listOf(iconAlpha, iconSlide, textAlpha, textSlide)); start() }
+                }
+                "bounce" -> {
+                    iconView.translationY = -300f
+                    val iconAlpha = ObjectAnimator.ofFloat(iconView, "alpha", 0f, 1f).apply { duration = 400 }
+                    val iconDrop = ObjectAnimator.ofFloat(iconView, "translationY", -300f, 0f).apply {
+                        duration = 700; interpolator = OvershootInterpolator(2.0f)
+                    }
+                    val iconScaleX = ObjectAnimator.ofFloat(iconView, "scaleX", 0.3f, 1f).apply { duration = 500 }
+                    val iconScaleY = ObjectAnimator.ofFloat(iconView, "scaleY", 0.3f, 1f).apply { duration = 500 }
+                    val textAlpha = ObjectAnimator.ofFloat(textView, "alpha", 0f, 1f).apply { startDelay = 500; duration = 400 }
+                    val textSlide = ObjectAnimator.ofFloat(textView, "translationY", 30f, 0f).apply { startDelay = 500; duration = 400 }
+                    AnimatorSet().apply { playTogether(listOf(iconAlpha, iconDrop, iconScaleX, iconScaleY, textAlpha, textSlide)); start() }
+                }
+                else -> {
+                    val iconScaleX = ObjectAnimator.ofFloat(iconView, "scaleX", 0.3f, 1f).apply {
+                        duration = 500; interpolator = OvershootInterpolator(1.5f)
+                    }
+                    val iconScaleY = ObjectAnimator.ofFloat(iconView, "scaleY", 0.3f, 1f).apply {
+                        duration = 500; interpolator = OvershootInterpolator(1.5f)
+                    }
+                    val iconAlpha = ObjectAnimator.ofFloat(iconView, "alpha", 0f, 1f).apply { duration = 400 }
+                    val textAlpha = ObjectAnimator.ofFloat(textView, "alpha", 0f, 1f).apply {
+                        startDelay = 300; duration = 400; interpolator = AccelerateDecelerateInterpolator()
+                    }
+                    val textSlide = ObjectAnimator.ofFloat(textView, "translationY", 30f, 0f).apply {
+                        startDelay = 300; duration = 400; interpolator = AccelerateDecelerateInterpolator()
+                    }
+                    AnimatorSet().apply { playTogether(listOf(iconScaleX, iconScaleY, iconAlpha, textAlpha, textSlide)); start() }
+                }
+            }
 
             // Branding watermark: HIDDEN by default. Only show when the API has explicitly
             // confirmed the project is on the free tier with no active Launch Pass.
@@ -207,24 +271,20 @@ class SplashActivity : AppCompatActivity() {
             prefetchBrandingStatus()
             // Pre-warm DNS + TLS for the website URL so MainActivity's WebView loads faster
             prefetchWebsiteConnection()
-            // Do not pre-warm WebView here: creating Chromium on the UI thread
-            // before the first draw keeps Android's plain splash-colour starting
-            // window visible, then the real splash content appears as a second
-            // screen. The splash UI must be the first actual drawn frame.
-
-            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                startMainActivity()
-            }, 1200)
+            // Pre-warm Chrome Custom Tabs for instant future CCT opens
+            warmupCustomTabs()
+            // Pre-warm Chromium WebView process so MainActivity's WebView creates instantly
+            // (W2NApplication already did this at process boot, but harmless to re-call)
+            prewarmWebView()
+            // Pre-load website HTML into WebView's shared HTTP cache so MainActivity's
+            // WebView serves it from disk instead of going to network on first launch.
+            prefetchWebsiteIntoWebViewCache()
+            // Adaptive dismiss: as early as 300ms once HTML starts arriving, never later than 1200ms.
+            scheduleAdaptiveSplashDismiss()
         } else {
-            // Splash disabled — do not inflate or prewarm anything that can draw
-            // a branded frame. Hand off to MainActivity instantly.
-            // We just hand off to MainActivity instantly with zero transition.
-            splashDisabled = true
-            startMainActivity()
+            startMainActivity(false)
         }
     }
-
-    private var splashDisabled = false
 
     private fun prewarmWebView() {
         // Construct a throwaway WebView on the main thread to force Chromium
@@ -356,31 +416,85 @@ class SplashActivity : AppCompatActivity() {
         }
     }
 
-    private fun startMainActivity() {
+    // --- First-launch performance helpers ---
+
+    private var prefetchWebView: android.webkit.WebView? = null
+    private var splashDismissed = false
+    private val splashStartedAtMs = System.currentTimeMillis()
+    // Hold the full splash (icon + text + loader) until the website is fully
+    // loaded in the hidden prefetch WebView, with a hard safety cap so a slow
+    // or broken site can never trap the user on the splash.
+    private val SPLASH_MIN_MS = 600L
+    private val SPLASH_MAX_HOLD_MS = 8000L
+
+    private fun prefetchWebsiteIntoWebViewCache() {
+        val websiteUrl = try { BuildConfig.WEBSITE_URL } catch (_: Exception) { "" }
+        if (websiteUrl.isEmpty()) return
+        try {
+            val wv = android.webkit.WebView(applicationContext)
+            wv.settings.javaScriptEnabled = true
+            wv.settings.domStorageEnabled = true
+            wv.settings.cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
+            val ua = wv.settings.userAgentString.replace("; wv)", ")")
+            wv.settings.userAgentString = "$ua WebToNative/1.0"
+            wv.webViewClient = object : android.webkit.WebViewClient() {
+                override fun onPageFinished(view: android.webkit.WebView?, url: String?) {
+                    val elapsed = System.currentTimeMillis() - splashStartedAtMs
+                    val wait = (SPLASH_MIN_MS - elapsed).coerceAtLeast(0)
+                    Log.d("SPLASH_PREFETCH_WV", "HTML finished after ${elapsed}ms, dismissing in ${wait}ms")
+                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ dismissSplash() }, wait)
+                }
+                override fun onReceivedError(
+                    view: android.webkit.WebView?,
+                    request: android.webkit.WebResourceRequest?,
+                    error: android.webkit.WebResourceError?
+                ) {
+                    if (request?.isForMainFrame == true) {
+                        Log.d("SPLASH_PREFETCH_WV", "Main-frame error, dismissing splash so MainActivity can show offline page")
+                        android.os.Handler(android.os.Looper.getMainLooper()).post { dismissSplash() }
+                    }
+                }
+            }
+            prefetchWebView = wv
+            wv.loadUrl(websiteUrl)
+        } catch (e: Exception) {
+            Log.d("SPLASH_PREFETCH_WV", "skipped: ${e.message}")
+            // If the prefetch can't even start, fall back to the safety timeout only.
+        }
+    }
+
+    private fun scheduleAdaptiveSplashDismiss() {
+        // Hard safety cap only — normal dismissal is driven by the prefetch
+        // WebView's onPageFinished so the rich splash stays visible until the
+        // website is fully loaded.
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            if (!splashDismissed) {
+                Log.w("SPLASH_PREFETCH_WV", "Safety timeout reached after ${SPLASH_MAX_HOLD_MS}ms, dismissing splash")
+            }
+            dismissSplash()
+        }, SPLASH_MAX_HOLD_MS)
+    }
+
+    @Synchronized
+    private fun dismissSplash() {
+        if (splashDismissed) return
+        splashDismissed = true
+        try { prefetchWebView?.destroy() } catch (_: Exception) { }
+        prefetchWebView = null
+        startMainActivity()
+    }
+
+    private fun startMainActivity(animate: Boolean = true) {
         // Cancel infinite dot animators to prevent leaks
         dotAnimators.forEach { it.cancel() }
         dotAnimators.clear()
 
-        val intent = Intent(this, MainActivity::class.java).apply {
-            if (splashDisabled || try { !BuildConfig.SPLASH_ENABLED } catch (_: Exception) { false }) {
-                addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION)
-            }
-        }
-        startActivity(intent)
-        if (splashDisabled) {
-            // No fade - go straight to MainActivity with zero transition
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                overrideActivityTransition(Activity.OVERRIDE_TRANSITION_CLOSE, 0, 0)
-            } else {
-                @Suppress("DEPRECATION")
-                overridePendingTransition(0, 0)
-            }
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            overrideActivityTransition(Activity.OVERRIDE_TRANSITION_CLOSE, 0, 0)
-        } else {
-            @Suppress("DEPRECATION")
-            overridePendingTransition(0, 0)
-        }
+        startActivity(Intent(this, MainActivity::class.java))
+        // Always use no-op transition: SplashActivity and MainActivity share the
+        // same splash bg color during handoff, so any cross-activity animation
+        // would expose an extra frame. Splash-off path was already animate=false.
+        @Suppress("DEPRECATION")
+        overridePendingTransition(0, 0)
         finish()
     }
 }
