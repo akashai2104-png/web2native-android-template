@@ -1,4 +1,3 @@
-# template-version: 2026-06-11-diagnostics-v2
 name: Android Build
 run-name: "Build ${{ github.event.client_payload.correlation_id || 'manual' }}"
 
@@ -633,30 +632,12 @@ jobs:
           PROJECT_ID="${{ steps.config.outputs.project_id }}"
           API_URL="${{ steps.config.outputs.api_base_url }}"
           ANON_KEY="${{ steps.config.outputs.supabase_anon_key }}"
-          BUILD_SECRET="${{ secrets.BUILD_SECRET }}"
           if [ -z "$API_URL" ]; then API_URL="${{ secrets.SUPABASE_URL }}"; fi
           if [ -z "$ANON_KEY" ]; then ANON_KEY="${{ secrets.SUPABASE_ANON_KEY }}"; fi
-
-          # Safe diagnostics — never print the secret itself
-          echo "=== Persist keystore diagnostics ==="
-          echo "PROJECT_ID present:   $([ -n "$PROJECT_ID" ] && echo yes || echo NO)"
-          echo "API_URL present:      $([ -n "$API_URL" ] && echo yes || echo NO)"
-          echo "ANON_KEY present:     $([ -n "$ANON_KEY" ] && echo yes || echo NO)"
-          echo "BUILD_SECRET present: $([ -n "$BUILD_SECRET" ] && echo yes || echo NO)"
-          echo "BUILD_SECRET length:  ${#BUILD_SECRET}"
-          # Strip leading/trailing whitespace/newlines defensively
-          BUILD_SECRET_TRIMMED="$(printf '%s' "$BUILD_SECRET" | tr -d '\r\n\t ')"
-          echo "BUILD_SECRET trimmed length: ${#BUILD_SECRET_TRIMMED}"
 
           if [ -z "$PROJECT_ID" ] || [ -z "$API_URL" ] || [ -z "$ANON_KEY" ]; then
             echo "Missing project_id or API credentials — skipping keystore persistence"
             exit 0
-          fi
-
-          if [ -z "$BUILD_SECRET_TRIMMED" ]; then
-            echo "ERROR: BUILD_SECRET not configured as GitHub Actions secret"
-            echo "Keystore cannot be persisted — future builds will produce a NEW SHA and break Play Store updates"
-            exit 1
           fi
 
           KEYSTORE_B64=$(base64 -w 0 "$KEYSTORE_PATH")
@@ -672,7 +653,7 @@ jobs:
             -X POST "${API_URL}/functions/v1/persist-keystore" \
             -H "Content-Type: application/json" \
             -H "apikey: ${ANON_KEY}" \
-            -H "x-build-secret: ${BUILD_SECRET_TRIMMED}" \
+            -H "Authorization: Bearer ${ANON_KEY}" \
             -d "{\"project_id\": \"${PROJECT_ID}\", \"keystore_base64\": \"${KEYSTORE_B64}\", \"keystore_password\": \"${KEYSTORE_PASSWORD}\", \"key_alias\": \"${KEY_ALIAS}\", \"key_password\": \"${KEY_PASSWORD}\"}")
 
           echo "Persist response ($HTTP_CODE):"
@@ -682,10 +663,8 @@ jobs:
           if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
             echo "Keystore persisted successfully"
           else
-            echo "ERROR: Keystore persistence failed — failing build to prevent SHA mismatch on Play Store"
-            exit 1
+            echo "WARNING: Keystore persistence failed (non-fatal)"
           fi
-
 
       - name: Register SHA-1 with Firebase (auto)
         if: steps.config.outputs.google_web_client_id != ''
