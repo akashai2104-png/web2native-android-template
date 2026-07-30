@@ -240,14 +240,7 @@ class MainActivity : AppCompatActivity() {
                 conn.setRequestProperty("Content-Type", "application/json")
                 conn.setRequestProperty("apikey", BuildConfig.SUPABASE_ANON_KEY)
                 conn.doOutput = true
-                // Best-effort device tags so we can see which OEMs / Android versions are silent.
-                // Strings are JSON-escaped to keep the payload safe.
-                fun esc(s: String?): String = (s ?: "").replace("\\", "\\\\").replace("\"", "\\\"")
-                val manufacturer = esc(android.os.Build.MANUFACTURER)
-                val model = esc(android.os.Build.MODEL)
-                val osVersion = esc(android.os.Build.VERSION.RELEASE)
-                val sdkInt = android.os.Build.VERSION.SDK_INT
-                val body = """{"project_id":"$projectId","platform":"android","config_receipt":{"manufacturer":"$manufacturer","device_model":"$model","os_version":"$osVersion","sdk_int":$sdkInt}}"""
+                val body = """{"project_id":"$projectId","platform":"android"}"""
                 conn.outputStream.use { it.write(body.toByteArray()) }
                 val code = conn.responseCode
                 if (code in 200..299) {
@@ -315,8 +308,8 @@ class MainActivity : AppCompatActivity() {
     private fun applyBrandingVisibility(brandingWatermark: TextView?, show: Boolean) {
         if (brandingWatermark == null) return
         if (show) {
-            // Branding bar is always brand blue with white text, independent of
-            // the user-selected theme/status-bar color. Free-tier only.
+            // Branding bar is always brand blue with white text, independent of the
+            // user-selected theme/status-bar color. Free-tier only.
             brandingWatermark.setBackgroundColor(Color.parseColor("#1D4ED8"))
             brandingWatermark.setTextColor(Color.WHITE)
             brandingWatermark.visibility = View.VISIBLE
@@ -1446,11 +1439,10 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Throwable) { /* best effort */ }
         super.onCreate(savedInstanceState)
 
-        // === PREDICTIVE BACK (Android 13+) ===
-        // The manifest sets android:enableOnBackInvokedCallback="true", so on API 33+
-        // the system routes back through OnBackInvokedDispatcher and stops calling
-        // onKeyDown/onBackPressed. Register a callback via the androidx dispatcher so
-        // back navigates the WebView history instead of closing the app on all versions.
+        // === PREDICTIVE BACK SUPPORT (Android 13+) ===
+        // The manifest sets android:enableOnBackInvokedCallback="true", so the legacy
+        // onKeyDown() back handling below is ignored on Android 13+. Register a
+        // dispatcher callback so back navigates WebView history instead of finishing.
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 if (this@MainActivity::webView.isInitialized && webView.canGoBack()) {
@@ -1660,11 +1652,11 @@ class MainActivity : AppCompatActivity() {
             schedulePeriodicBrandingCheck(brandingWatermark)
         }, 3000)
 
-        // Trial overlay — initialize and run check quickly so day-3 hard block paints early
+        // Trial overlay — initialize but defer network check
         trialOverlayManager = TrialOverlayManager(this)
         deferHandler.postDelayed({
             trialOverlayManager.checkTrialStatus()
-        }, 400)
+        }, 2000)
 
         val splashDesign = try { BuildConfig.SPLASH_DESIGN } catch (_: Exception) { "dots" }
         val splashActive = BuildConfig.SPLASH_TEXT.isNotEmpty() || (splashDesign.isNotEmpty() && splashDesign != "none")
@@ -1773,10 +1765,6 @@ class MainActivity : AppCompatActivity() {
 
         // JavaScript bridge — allows websites to detect native app
         webView.addJavascriptInterface(WebToNativeBridge(), "WebToNative")
-        // Add-on Pack v1 — native share bridge (zero-config for site authors)
-        if (BuildConfig.NATIVE_SHARE_ENABLED) {
-            webView.addJavascriptInterface(NativeBridge(this), NativeBridge.NAME)
-        }
 
         // File download support via DownloadManager
         webView.setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
@@ -1803,16 +1791,6 @@ class MainActivity : AppCompatActivity() {
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                 val url = request?.url?.toString() ?: return false
                 Log.d("W2N_NAV", "WebViewClient.shouldOverrideUrlLoading: $url")
-                // Add-on Pack v1: URL policy decides first; fall through when "auto".
-                UrlPolicy.shouldOpenExternally(url)?.let { ext ->
-                    if (ext) {
-                        Log.d("W2N_NAV", "URL policy → external: $url")
-                        return try { openInChromeCustomTab(url, "url_policy"); true } catch (_: Throwable) { false }
-                    } else {
-                        Log.d("W2N_NAV", "URL policy → in-app: $url")
-                        return false
-                    }
-                }
                 return shouldOverrideNavigation(url)
             }
 
@@ -1875,11 +1853,6 @@ class MainActivity : AppCompatActivity() {
                 // Guarded: no-op if site already has viewport. Re-checks after 500ms for SPAs that re-hydrate <head>.
                 if (BuildConfig.AUTO_INJECT_VIEWPORT) {
                     view?.evaluateJavascript(VIEWPORT_INJECTION_JS, null)
-                }
-
-                // Add-on Pack v1: auto-upgrade navigator.share() to the native bridge.
-                if (BuildConfig.NATIVE_SHARE_ENABLED) {
-                    try { view?.evaluateJavascript(NativeBridge.SHIM_JS, null) } catch (_: Throwable) { }
                 }
 
                 // Remote telemetry for page loads during/after OAuth
@@ -2447,9 +2420,6 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
 
-        // Add-on Pack v1: maybe show the native In-App Review prompt.
-        try { ReviewManager.maybeShow(this) } catch (_: Throwable) { }
-
         Log.d("W2N_AUTH", "┌─ onResume ──────────────────────────────")
         Log.d("W2N_AUTH", "│ wasInBackground=$wasInBackground")
         Log.d("W2N_AUTH", "│ skipNextResumeReload=$skipNextResumeReload")
@@ -2501,9 +2471,6 @@ class MainActivity : AppCompatActivity() {
             checkBrandingStatus(brandingWatermark, cachedBranding)
             checkAdStatusRuntime()
         }
-        // Re-assert trial state on every resume so backgrounding can't escape a hard block,
-        // and so a free→paid upgrade flips off the overlay the next time the user returns.
-        try { if (::trialOverlayManager.isInitialized) trialOverlayManager.checkTrialStatus() } catch (_: Throwable) {}
         val backgroundDurationMs = if (wasInBackground && backgroundSinceMs > 0) System.currentTimeMillis() - backgroundSinceMs else 0L
         if (wasInBackground && pageLoaded && backgroundDurationMs > BACKGROUND_RELOAD_THRESHOLD_MS) {
             Log.d("W2N_AUTH", "│ ACTION: reload WebView to pick up session (away ${backgroundDurationMs}ms)")
