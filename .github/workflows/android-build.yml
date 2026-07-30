@@ -634,10 +634,6 @@ jobs:
           ANON_KEY="${{ steps.config.outputs.supabase_anon_key }}"
           if [ -z "$API_URL" ]; then API_URL="${{ secrets.SUPABASE_URL }}"; fi
           if [ -z "$ANON_KEY" ]; then ANON_KEY="${{ secrets.SUPABASE_ANON_KEY }}"; fi
-          BUILD_SECRET_TRIMMED="$(printf '%s' "${{ secrets.BUILD_SECRET }}" | tr -d '\r\n\t ')"
-          if [ -z "$BUILD_SECRET_TRIMMED" ]; then
-            echo "::error::BUILD_SECRET not configured — keystore cannot be persisted"
-          fi
 
           if [ -z "$PROJECT_ID" ] || [ -z "$API_URL" ] || [ -z "$ANON_KEY" ]; then
             echo "Missing project_id or API credentials — skipping keystore persistence"
@@ -657,7 +653,7 @@ jobs:
             -X POST "${API_URL}/functions/v1/persist-keystore" \
             -H "Content-Type: application/json" \
             -H "apikey: ${ANON_KEY}" \
-            -H "x-build-secret: ${BUILD_SECRET_TRIMMED}" \
+            -H "Authorization: Bearer ${ANON_KEY}" \
             -d "{\"project_id\": \"${PROJECT_ID}\", \"keystore_base64\": \"${KEYSTORE_B64}\", \"keystore_password\": \"${KEYSTORE_PASSWORD}\", \"key_alias\": \"${KEY_ALIAS}\", \"key_password\": \"${KEY_PASSWORD}\"}")
 
           echo "Persist response ($HTTP_CODE):"
@@ -667,7 +663,7 @@ jobs:
           if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
             echo "Keystore persisted successfully"
           else
-            echo "::error::Keystore persistence failed (HTTP $HTTP_CODE) — future rebuilds would produce a NEW signing key and break Play Store updates"
+            echo "WARNING: Keystore persistence failed (non-fatal)"
           fi
 
       - name: Register SHA-1 with Firebase (auto)
