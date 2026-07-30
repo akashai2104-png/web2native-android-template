@@ -635,7 +635,9 @@ jobs:
           if [ -z "$API_URL" ]; then API_URL="${{ secrets.SUPABASE_URL }}"; fi
           if [ -z "$ANON_KEY" ]; then ANON_KEY="${{ secrets.SUPABASE_ANON_KEY }}"; fi
 
-          if [ -z "$PROJECT_ID" ] || [ -z "$API_URL" ] || [ -z "$ANON_KEY" ]; then
+          BUILD_SECRET="${{ secrets.BUILD_SECRET }}"
+
+          if [ -z "$PROJECT_ID" ] || [ -z "$API_URL" ]; then
             echo "Missing project_id or API credentials — skipping keystore persistence"
             exit 0
           fi
@@ -653,7 +655,7 @@ jobs:
             -X POST "${API_URL}/functions/v1/persist-keystore" \
             -H "Content-Type: application/json" \
             -H "apikey: ${ANON_KEY}" \
-            -H "Authorization: Bearer ${ANON_KEY}" \
+            -H "x-build-secret: ${BUILD_SECRET}" \
             -d "{\"project_id\": \"${PROJECT_ID}\", \"keystore_base64\": \"${KEYSTORE_B64}\", \"keystore_password\": \"${KEYSTORE_PASSWORD}\", \"key_alias\": \"${KEY_ALIAS}\", \"key_password\": \"${KEY_PASSWORD}\"}")
 
           echo "Persist response ($HTTP_CODE):"
@@ -663,7 +665,7 @@ jobs:
           if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
             echo "Keystore persisted successfully"
           else
-            echo "WARNING: Keystore persistence failed (non-fatal)"
+            echo "::error::Keystore persistence failed (HTTP $HTTP_CODE) for project $PROJECT_ID — app signing key will change on next rebuild"
           fi
 
       - name: Register SHA-1 with Firebase (auto)
