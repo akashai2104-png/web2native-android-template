@@ -68,6 +68,10 @@ workflows:
           inject CM_OFFLINE_HTML_B64     "app/src/main/assets/offline.html"   && INJECTED=$((INJECTED+1)) || true
           inject CM_APP_BUILD_GRADLE_B64 "app/build.gradle"                   && INJECTED=$((INJECTED+1)) || true
           inject CM_ROOT_BUILD_GRADLE_B64 "build.gradle"                      && INJECTED=$((INJECTED+1)) || true
+          inject CM_TRIAL_OVERLAY_B64    "$KOTLIN_DIR/TrialOverlayManager.kt"  && INJECTED=$((INJECTED+1)) || true
+          inject CM_W2N_DIAGNOSTICS_B64  "$KOTLIN_DIR/W2NDiagnostics.kt"       && INJECTED=$((INJECTED+1)) || true
+          
+          chmod +x gradlew 2>/dev/null || true
           
           echo "Template injection complete: $INJECTED files injected"
 
@@ -342,6 +346,7 @@ workflows:
       - name: Set up signing keystore
         script: |
           FREE_TIER="${CM_FREE_TIER:-false}"
+          rm -f /tmp/w2n_keystore_sha1 /tmp/w2n_keystore_generated
           if [ "$FREE_TIER" = "true" ]; then
             echo "Free tier build — skipping release keystore (debug-signed only)"
             exit 0
@@ -352,19 +357,24 @@ workflows:
           KEY_ALIAS="${CM_KEY_ALIAS:-upload}"
           KEY_PASSWORD="${CM_KEY_PASSWORD:-android}"
 
-          if [ -n "$CM_KEYSTORE_BASE64" ]; then
+          GENERATED="false"
+          if [ -n "${CM_KEYSTORE_BASE64:-}" ]; then
+            echo "Using persisted keystore from project secrets"
             echo "$CM_KEYSTORE_BASE64" | base64 -d > "$KEYSTORE_PATH"
           elif [ ! -f "$KEYSTORE_PATH" ]; then
+            echo "No persisted keystore — generating new one"
             keytool -genkeypair -v \
               -keystore "$KEYSTORE_PATH" -alias "$KEY_ALIAS" \
               -keyalg RSA -keysize 2048 -validity 10000 \
               -storepass "$KEYSTORE_PASSWORD" -keypass "$KEY_PASSWORD" \
               -dname "CN=Web2Native, OU=Apps, O=Web2Native, L=Internet, ST=Cloud, C=US"
-            echo "KEYSTORE_B64_OUTPUT_START"
-            base64 -w 0 "$KEYSTORE_PATH"
-            echo ""
-            echo "KEYSTORE_B64_OUTPUT_END"
+            GENERATED="true"
           fi
+
+          SHA1=$(keytool -list -v -keystore "$KEYSTORE_PATH" -alias "$KEY_ALIAS" -storepass "$KEYSTORE_PASSWORD" 2>/dev/null | grep "SHA1:" | awk '{print $2}')
+          echo "Keystore SHA-1: $SHA1"
+          echo "$SHA1" > /tmp/w2n_keystore_sha1
+          echo "$GENERATED" > /tmp/w2n_keystore_generated
 
           cat > signing.properties << EOF
           storeFile=$KEYSTORE_PATH
@@ -372,6 +382,78 @@ workflows:
           keyAlias=$KEY_ALIAS
           keyPassword=$KEY_PASSWORD
           EOF
+
+      - name: Persist keystore to backend
+        script: |
+          GENERATED=$(cat /tmp/w2n_keystore_generated 2>/dev/null || echo "false")
+          if [ "$GENERATED" != "true" ]; then
+            echo "Keystore was not newly generated — nothing to persist"
+            exit 0
+          fi
+
+          KEYSTORE_PATH="$CM_BUILD_DIR/keystore.jks"
+          PROJECT_ID="${CM_PROJECT_ID:-}"
+          API_URL="${CM_API_BASE_URL:-}"
+          ANON_KEY="${CM_SUPABASE_ANON_KEY:-}"
+          BUILD_SECRET="${CM_BUILD_SECRET:-}"
+
+          if [ -z "$PROJECT_ID" ] || [ -z "$API_URL" ]; then
+            echo "Missing project_id or API base URL — skipping keystore persistence"
+            exit 0
+          fi
+
+          KEYSTORE_B64=$(base64 -w 0 "$KEYSTORE_PATH" 2>/dev/null || base64 "$KEYSTORE_PATH" | tr -d '\n')
+          KEYSTORE_PASSWORD="${CM_KEYSTORE_PASSWORD:-android}"
+          KEY_ALIAS="${CM_KEY_ALIAS:-upload}"
+          KEY_PASSWORD="${CM_KEY_PASSWORD:-android}"
+
+          echo "Persisting keystore for project $PROJECT_ID..."
+          HTTP_CODE=$(curl -s -o /tmp/persist_response.json -w "%{http_code}" \
+            -X POST "${API_URL}/functions/v1/persist-keystore" \
+            -H "Content-Type: application/json" \
+            -H "apikey: ${ANON_KEY}" \
+            -H "x-build-secret: ${BUILD_SECRET}" \
+            -d "{\"project_id\": \"${PROJECT_ID}\", \"keystore_base64\": \"${KEYSTORE_B64}\", \"keystore_password\": \"${KEYSTORE_PASSWORD}\", \"key_alias\": \"${KEY_ALIAS}\", \"key_password\": \"${KEY_PASSWORD}\"}")
+
+          echo "Persist response ($HTTP_CODE):"
+          cat /tmp/persist_response.json
+          echo ""
+
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+            echo "Keystore persisted successfully"
+          else
+            echo "ERROR: Keystore persistence failed (HTTP $HTTP_CODE) for project $PROJECT_ID — app signing key will change on next rebuild"
+          fi
+
+      - name: Register SHA-1 with Firebase (auto)
+        script: |
+          SHA1=$(cat /tmp/w2n_keystore_sha1 2>/dev/null || echo "")
+          CLIENT_ID="${CM_GOOGLE_WEB_CLIENT_ID:-}"
+          API_URL="${CM_API_BASE_URL:-}"
+          ANON_KEY="${CM_SUPABASE_ANON_KEY:-}"
+          PACKAGE="${CM_APP_ID:-}"
+
+          if [ -z "$CLIENT_ID" ] || [ -z "$SHA1" ] || [ -z "$API_URL" ] || [ -z "$ANON_KEY" ]; then
+            echo "Missing SHA-1, client id or backend credentials — skipping Firebase SHA registration"
+            exit 0
+          fi
+
+          echo "Registering SHA-1 $SHA1 for package $PACKAGE..."
+          HTTP_CODE=$(curl -s -o /tmp/sha_response.json -w "%{http_code}" \
+            -X POST "${API_URL}/functions/v1/register-firebase-sha" \
+            -H "Content-Type: application/json" \
+            -H "apikey: ${ANON_KEY}" \
+            -d "{\"package_name\": \"${PACKAGE}\", \"sha1_fingerprint\": \"${SHA1}\"}")
+
+          echo "Response ($HTTP_CODE):"
+          cat /tmp/sha_response.json
+          echo ""
+
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+            echo "SHA-1 registration successful"
+          else
+            echo "SHA-1 registration failed (non-fatal) — Google Sign-In may not work"
+          fi
 
       - name: Configure Firebase for push notifications
         script: |
