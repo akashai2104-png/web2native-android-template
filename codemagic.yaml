@@ -402,7 +402,7 @@ workflows:
             exit 0
           fi
 
-          KEYSTORE_B64=$(base64 -w 0 "$KEYSTORE_PATH" 2>/dev/null || base64 "$KEYSTORE_PATH" | tr -d '\n')
+          KEYSTORE_B64=$(openssl base64 -A -in "$KEYSTORE_PATH")
           KEYSTORE_PASSWORD="${CM_KEYSTORE_PASSWORD:-android}"
           KEY_ALIAS="${CM_KEY_ALIAS:-upload}"
           KEY_PASSWORD="${CM_KEY_PASSWORD:-android}"
