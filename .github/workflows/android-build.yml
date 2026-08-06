@@ -38,7 +38,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       GRADLE_OPTS: "-Dorg.gradle.parallel=true -Dorg.gradle.caching=true -Xmx3g"
 
@@ -732,6 +732,7 @@ jobs:
         run: chmod +x ./gradlew
 
       - name: Build Android artifacts
+        timeout-minutes: 20
         env:
           CM_APP_NAME: ${{ steps.inputs.outputs.app_name }}
           CM_APP_ID: ${{ steps.inputs.outputs.package_name }}
