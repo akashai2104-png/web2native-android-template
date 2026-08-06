@@ -1,3 +1,4 @@
+# template-version: 2026-06-11-diagnostics-v2
 name: Android Build
 run-name: "Build ${{ github.event.client_payload.correlation_id || 'manual' }}"
 
@@ -38,7 +39,10 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Job timeout covers runner queue wait + execution. Keep it generous so a slow
+    # runner allocation can't cancel the job before step 1; the Gradle build step
+    # carries its own tight timeout below.
+    timeout-minutes: 30
     env:
       GRADLE_OPTS: "-Dorg.gradle.parallel=true -Dorg.gradle.caching=true -Xmx3g"
 
@@ -309,6 +313,9 @@ jobs:
 
           ANDROID = '{http://schemas.android.com/apk/res/android}'
           ET.register_namespace('android', 'http://schemas.android.com/apk/res/android')
+          # tools:node placeholders on AD_ID + AdMob meta-data must survive round-trip.
+          ET.register_namespace('tools', 'http://schemas.android.com/tools')
+
           manifest = Path('app/src/main/AndroidManifest.xml')
           tree = ET.parse(manifest)
           root = tree.getroot()
@@ -632,14 +639,30 @@ jobs:
           PROJECT_ID="${{ steps.config.outputs.project_id }}"
           API_URL="${{ steps.config.outputs.api_base_url }}"
           ANON_KEY="${{ steps.config.outputs.supabase_anon_key }}"
+          BUILD_SECRET="${{ secrets.BUILD_SECRET }}"
           if [ -z "$API_URL" ]; then API_URL="${{ secrets.SUPABASE_URL }}"; fi
           if [ -z "$ANON_KEY" ]; then ANON_KEY="${{ secrets.SUPABASE_ANON_KEY }}"; fi
 
-          BUILD_SECRET="${{ secrets.BUILD_SECRET }}"
+          # Safe diagnostics — never print the secret itself
+          echo "=== Persist keystore diagnostics ==="
+          echo "PROJECT_ID present:   $([ -n "$PROJECT_ID" ] && echo yes || echo NO)"
+          echo "API_URL present:      $([ -n "$API_URL" ] && echo yes || echo NO)"
+          echo "ANON_KEY present:     $([ -n "$ANON_KEY" ] && echo yes || echo NO)"
+          echo "BUILD_SECRET present: $([ -n "$BUILD_SECRET" ] && echo yes || echo NO)"
+          echo "BUILD_SECRET length:  ${#BUILD_SECRET}"
+          # Strip leading/trailing whitespace/newlines defensively
+          BUILD_SECRET_TRIMMED="$(printf '%s' "$BUILD_SECRET" | tr -d '\r\n\t ')"
+          echo "BUILD_SECRET trimmed length: ${#BUILD_SECRET_TRIMMED}"
 
-          if [ -z "$PROJECT_ID" ] || [ -z "$API_URL" ]; then
+          if [ -z "$PROJECT_ID" ] || [ -z "$API_URL" ] || [ -z "$ANON_KEY" ]; then
             echo "Missing project_id or API credentials — skipping keystore persistence"
             exit 0
+          fi
+
+          if [ -z "$BUILD_SECRET_TRIMMED" ]; then
+            echo "ERROR: BUILD_SECRET not configured as GitHub Actions secret"
+            echo "Keystore cannot be persisted — future builds will produce a NEW SHA and break Play Store updates"
+            exit 1
           fi
 
           KEYSTORE_B64=$(base64 -w 0 "$KEYSTORE_PATH")
@@ -655,7 +678,7 @@ jobs:
             -X POST "${API_URL}/functions/v1/persist-keystore" \
             -H "Content-Type: application/json" \
             -H "apikey: ${ANON_KEY}" \
-            -H "x-build-secret: ${BUILD_SECRET}" \
+            -H "x-build-secret: ${BUILD_SECRET_TRIMMED}" \
             -d "{\"project_id\": \"${PROJECT_ID}\", \"keystore_base64\": \"${KEYSTORE_B64}\", \"keystore_password\": \"${KEYSTORE_PASSWORD}\", \"key_alias\": \"${KEY_ALIAS}\", \"key_password\": \"${KEY_PASSWORD}\"}")
 
           echo "Persist response ($HTTP_CODE):"
@@ -665,8 +688,10 @@ jobs:
           if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
             echo "Keystore persisted successfully"
           else
-            echo "::error::Keystore persistence failed (HTTP $HTTP_CODE) for project $PROJECT_ID — app signing key will change on next rebuild"
+            echo "ERROR: Keystore persistence failed — failing build to prevent SHA mismatch on Play Store"
+            exit 1
           fi
+
 
       - name: Register SHA-1 with Firebase (auto)
         if: steps.config.outputs.google_web_client_id != ''
@@ -732,6 +757,7 @@ jobs:
         run: chmod +x ./gradlew
 
       - name: Build Android artifacts
+        timeout-minutes: 20
         env:
           CM_APP_NAME: ${{ steps.inputs.outputs.app_name }}
           CM_APP_ID: ${{ steps.inputs.outputs.package_name }}
@@ -800,7 +826,7 @@ jobs:
             esac
           fi
 
-      - name: Verify built artifacts (signing + manifest sanity)
+      - name: Verify built artifacts (signing + manifest + 16 KB alignment)
         if: ${{ always() }}
         continue-on-error: true
         run: |
@@ -810,11 +836,21 @@ jobs:
           BT_VER="$(ls "$BT_DIR" 2>/dev/null | sort -V | tail -1)"
           APKSIGNER="$BT_DIR/$BT_VER/apksigner"
           AAPT2="$BT_DIR/$BT_VER/aapt2"
+          ZIPALIGN="$BT_DIR/$BT_VER/zipalign"
           echo "Using build-tools: $BT_VER"
           shopt -s globstar nullglob
           APKS=( app/build/outputs/**/*.apk )
           AABS=( app/build/outputs/**/*.aab )
           echo "APKs found: ${#APKS[@]}; AABs found: ${#AABS[@]}"
+          ALIGN_FAIL=0
+          APK_FIXED=0
+          KEYSTORE_PATH="${{ github.workspace }}/keystore.jks"
+          KEYSTORE_PASSWORD="${{ steps.config.outputs.keystore_password }}"
+          KEY_ALIAS="${{ steps.config.outputs.key_alias }}"
+          KEY_PASSWORD="${{ steps.config.outputs.key_password }}"
+          KEYSTORE_PASSWORD="${KEYSTORE_PASSWORD:-android}"
+          KEY_ALIAS="${KEY_ALIAS:-upload}"
+          KEY_PASSWORD="${KEY_PASSWORD:-android}"
           for f in "${APKS[@]}"; do
             echo "--- APK: $f ($(stat -c%s "$f" 2>/dev/null) bytes) ---"
             "$APKSIGNER" verify --verbose "$f" 2>&1 | head -40
@@ -822,13 +858,94 @@ jobs:
             DEX_COUNT=$(unzip -l "$f" 2>/dev/null | grep -cE "classes[0-9]*\.dex$")
             echo "dex_files=$DEX_COUNT"
             [ "$DEX_COUNT" -lt 1 ] && echo "::warning::APK has no dex files: $f"
+            # Google Play 16 KB page-size alignment requirement (Android 15+,
+            # enforced Nov 1 2025). zipalign -P 16 fails if any native .so is
+            # not 16 KB-aligned in the zip.
+            echo "Checking 16 KB alignment on $f"
+            "$ZIPALIGN" -c -P 16 -v 4 "$f" | tail -20
+            if [ "${PIPESTATUS[0]}" != "0" ]; then
+              echo "::warning::16 KB alignment check failed for $f — attempting auto-remediation"
+              # Auto-remediation for APK: re-zipalign with -P 16, then re-sign.
+              # This fixes zip-level misalignment without touching dependencies.
+              FIXED="${f%.apk}.aligned.apk"
+              if "$ZIPALIGN" -f -P 16 -v 4 "$f" "$FIXED" > /dev/null 2>&1; then
+                if [ -f "$KEYSTORE_PATH" ]; then
+                  if "$APKSIGNER" sign \
+                    --ks "$KEYSTORE_PATH" \
+                    --ks-pass "pass:$KEYSTORE_PASSWORD" \
+                    --key-pass "pass:$KEY_PASSWORD" \
+                    --ks-key-alias "$KEY_ALIAS" \
+                    --v1-signing-enabled true \
+                    --v2-signing-enabled true \
+                    --v3-signing-enabled true \
+                    --v4-signing-enabled true \
+                    "$FIXED" > /dev/null 2>&1; then
+                    mv -f "$FIXED" "$f"
+                    if "$ZIPALIGN" -c -P 16 -v 4 "$f" > /dev/null 2>&1 \
+                       && "$APKSIGNER" verify "$f" > /dev/null 2>&1; then
+                      echo "✅ Auto-fixed alignment on $f (re-zipaligned + re-signed)"
+                      APK_FIXED=1
+                    else
+                      echo "::warning::Auto-fix ran but post-verification still failed for $f"
+                      ALIGN_FAIL=1
+                    fi
+                  else
+                    echo "::warning::Auto-fix re-signing failed for $f — shipping original"
+                    rm -f "$FIXED"
+                    ALIGN_FAIL=1
+                  fi
+                else
+                  echo "::warning::No release keystore available (free-tier / debug build) — cannot re-sign aligned APK"
+                  rm -f "$FIXED"
+                  ALIGN_FAIL=1
+                fi
+              else
+                echo "::warning::zipalign auto-fix failed to produce output for $f"
+                ALIGN_FAIL=1
+              fi
+            fi
           done
           for f in "${AABS[@]}"; do
             echo "--- AAB: $f ($(stat -c%s "$f" 2>/dev/null) bytes) ---"
             unzip -l "$f" 2>/dev/null | head -10
+            # For AAB we can't zipalign directly. Misalignment lives inside the
+            # dependency's shipped .so, so no post-build tool can remediate it —
+            # the dependency itself must be bumped. Locked deps today are all
+            # 16 KB clean, so this branch is a canary for future regressions.
+            TMPDIR="$(mktemp -d)"
+            unzip -o -q "$f" -d "$TMPDIR" "**/*.so" 2>/dev/null
+            SO_COUNT=0
+            SO_BAD=0
+            while IFS= read -r so; do
+              SO_COUNT=$((SO_COUNT + 1))
+              ALIGN_HEX=$(readelf -l "$so" 2>/dev/null | awk '/LOAD/ {print $NF; exit}')
+              case "$ALIGN_HEX" in
+                0x4000|0x8000|0x10000) : ;;
+                *)
+                  REL_SO="${so#$TMPDIR/}"
+                  echo "::warning::AAB native lib $REL_SO has LOAD align $ALIGN_HEX (want >= 0x4000). Bump the dependency that ships this .so to a 16 KB-compliant version."
+                  SO_BAD=$((SO_BAD + 1))
+                  ;;
+              esac
+            done < <(find "$TMPDIR" -name '*.so')
+            echo "AAB native libs scanned=$SO_COUNT misaligned=$SO_BAD"
+            if [ "$SO_BAD" -gt 0 ]; then
+              echo "::warning::AAB $f has $SO_BAD misaligned .so file(s). Cannot auto-fix at the artifact level — dependency bump required. Uploading as-is so the user still receives an artifact."
+            fi
+            rm -rf "$TMPDIR"
           done
+          if [ "$APK_FIXED" = "1" ] && [ "$ALIGN_FAIL" = "0" ]; then
+            echo "alignment_status=apk_fixed"
+          elif [ "$ALIGN_FAIL" != "0" ]; then
+            echo "alignment_status=aab_warn_or_apk_unfixed"
+          else
+            echo "alignment_status=ok"
+          fi
           echo "=== VERIFICATION COMPLETE ==="
           exit 0
+
+
+
 
       - name: Upload APK
         if: ${{ steps.inputs.outputs.build_format != 'aab' }}
