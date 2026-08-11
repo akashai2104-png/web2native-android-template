@@ -63,6 +63,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var swipeRefresh: SwipeRefreshLayout
     private var loadingOverlay: LinearLayout? = null
     private var pageLoaded = false
+
+    // Pull-to-refresh gating. The WebView's own scrollY stays 0 on pages that
+    // scroll an inner container, which made refresh fire mid-page and swallow
+    // downward swipes. The page reports the real scroll position via the JS
+    // bridge; until it does, we fall back to the native scrollY heuristic.
+    private var pullRefreshJsGuardActive = false
+    private var pullRefreshJsAtTop = false
+
     private var updateCheckDone = false
     private var wasInBackground = false
     private var backgroundSinceMs: Long = 0L
@@ -1855,6 +1863,13 @@ class MainActivity : AppCompatActivity() {
                     view?.evaluateJavascript(VIEWPORT_INJECTION_JS, null)
                 }
 
+                // Pull-to-refresh guard: report the real scroll position so the
+                // refresh gesture can't hijack scrolling on inner-scroll pages.
+                pullRefreshJsGuardActive = false
+                pullRefreshJsAtTop = false
+                try { view?.evaluateJavascript(PULL_REFRESH_GUARD_JS, null) } catch (_: Throwable) { }
+
+
                 // Remote telemetry for page loads during/after OAuth
                 if (webViewManagedAuthInProgress || lastCustomTabReason == "oauth") {
                     postAuthDiagnostic("page_finished_during_auth", mapOf(
@@ -2152,10 +2167,17 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Only allow pull-to-refresh when WebView is scrolled to the top
+        // Only allow pull-to-refresh when the *actual* scroll container is at the
+        // top. Once the page starts reporting via the JS guard we trust that;
+        // before then keep the old native-scrollY behaviour.
         webView.setOnScrollChangeListener { _, _, scrollY, _, _ ->
-            swipeRefresh.isEnabled = scrollY == 0
+            if (pullRefreshJsGuardActive) {
+                swipeRefresh.isEnabled = pullRefreshJsAtTop && scrollY == 0
+            } else {
+                swipeRefresh.isEnabled = scrollY == 0
+            }
         }
+
 
         swipeRefresh.setOnRefreshListener {
             webView.settings.cacheMode = WebSettings.LOAD_NO_CACHE
@@ -2509,6 +2531,22 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun isNativeApp(): Boolean = true
 
+        /**
+         * Reported by the injected pull-to-refresh guard: is the scroll container
+         * the user is actually touching at its very top? Anything other than a
+         * clear "yes" keeps the refresh gesture disabled so scrolling never breaks.
+         */
+        @JavascriptInterface
+        fun setPullRefreshAtTop(atTop: Boolean) {
+            runOnUiThread {
+                pullRefreshJsGuardActive = true
+                pullRefreshJsAtTop = atTop
+                try { swipeRefresh.isEnabled = atTop } catch (_: Throwable) { }
+            }
+        }
+
+
+
         @JavascriptInterface
         fun getAppVersion(): String = BuildConfig.VERSION_NAME
 
@@ -2609,5 +2647,54 @@ class MainActivity : AppCompatActivity() {
   setTimeout(function(){ try { if (ensure()) console.log('[W2N] viewport re-injected after hydration'); } catch(e){} }, 500);
 })();
 """
+
+        // Pull-to-refresh guard. The WebView's own scrollY is 0 on pages that
+        // scroll an inner container, so the native check thought the user was
+        // always "at the top" and hijacked downward swipes with a refresh.
+        // This reports the real scroll position of whatever element the finger
+        // is on; anything unknown reports false (refresh off, scrolling works).
+        private const val PULL_REFRESH_GUARD_JS = """
+(function(){
+  if (window.__w2nPullGuard) return;
+  window.__w2nPullGuard = 1;
+  function report(v){ try { WebToNative.setPullRefreshAtTop(!!v); } catch(e){} }
+  function scroller(el){
+    try {
+      while (el && el.nodeType === 1) {
+        var s = window.getComputedStyle(el);
+        var oy = s ? s.overflowY : '';
+        if ((oy === 'auto' || oy === 'scroll' || oy === 'overlay') && el.scrollHeight > el.clientHeight + 1) return el;
+        el = el.parentElement;
+      }
+    } catch(e){}
+    return null;
+  }
+  function atTop(el){
+    try {
+      if (!el) {
+        var d = document.scrollingElement || document.documentElement || document.body;
+        return (window.pageYOffset || (d && d.scrollTop) || 0) <= 0;
+      }
+      return el.scrollTop <= 0;
+    } catch(e){ return false; }
+  }
+  document.addEventListener('touchstart', function(e){
+    try {
+      var t = e.target;
+      var el = (t && t.nodeType === 1) ? t : (t && t.parentElement);
+      report(atTop(scroller(el)));
+    } catch(err){ report(false); }
+  }, { passive: true, capture: true });
+  document.addEventListener('scroll', function(e){
+    try {
+      var t = e.target;
+      var el = (t === document || t === document.body || t === document.documentElement) ? null : t;
+      report(atTop(el));
+    } catch(err){ report(false); }
+  }, { passive: true, capture: true });
+  report(atTop(null));
+})();
+"""
+
     }
 }
