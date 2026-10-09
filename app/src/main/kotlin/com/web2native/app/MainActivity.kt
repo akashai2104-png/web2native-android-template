@@ -316,8 +316,8 @@ class MainActivity : AppCompatActivity() {
     private fun applyBrandingVisibility(brandingWatermark: TextView?, show: Boolean) {
         if (brandingWatermark == null) return
         if (show) {
-            // Branding bar is always brand blue with white text, independent of the
-            // user-selected theme/status-bar color. Free-tier only.
+            // Branding bar is always brand blue with white text, independent of
+            // the user-selected theme/status-bar color. Free-tier only.
             brandingWatermark.setBackgroundColor(Color.parseColor("#1D4ED8"))
             brandingWatermark.setTextColor(Color.WHITE)
             brandingWatermark.visibility = View.VISIBLE
@@ -830,7 +830,9 @@ class MainActivity : AppCompatActivity() {
             "supabase.co",
             "supabase.com",
             "lovable.dev",
-            "lovable.app"
+            "lovable.app",
+            "base44.app",
+            "base44.com"
         )
 
         return oauthHosts.any { host == it || host.endsWith(".$it") }
@@ -860,7 +862,8 @@ class MainActivity : AppCompatActivity() {
             "response_type",
             "scope",
             "code_challenge",
-            "state"
+            "state",
+            "from_url"
         ).any { uri.getQueryParameter(it) != null }
 
         val genericAuthPath = path.contains("/auth") || path.contains("/oauth") || path.contains("/authorize")
@@ -1040,14 +1043,17 @@ class MainActivity : AppCompatActivity() {
      * Opens a URL in Chrome Custom Tab (used for non-OAuth external links).
      */
     private fun openInChromeCustomTab(url: String, reason: String = "external") {
+        // Tag every CCT launch from this app so the web side can distinguish it from
+        // regular Android Chrome and only then show the "Continue to App" overlay.
+        val taggedUrl = appendW2NAppMarker(url)
         val ctPackage = getCustomTabsPackage()
 
         if (reason == "oauth") {
-            lastCustomTabUrl = url
+            lastCustomTabUrl = taggedUrl
             lastCustomTabReason = reason
             lastCustomTabOpenedAtMs = System.currentTimeMillis()
             postAuthDiagnostic("oauth_cct_launch_attempt", mapOf(
-                "url" to url,
+                "url" to taggedUrl,
                 "reason" to reason,
                 "customTabsPackage" to ctPackage,
             ))
@@ -1056,7 +1062,7 @@ class MainActivity : AppCompatActivity() {
         if (ctPackage == null) {
             Log.w("W2N_AUTH", "No Custom Tabs provider found — loading URL in WebView")
             try {
-                webView.post { webView.loadUrl(url) }
+                webView.post { webView.loadUrl(taggedUrl) }
             } catch (e: Exception) {
                 Log.e("W2N_AUTH", "WebView fallback failed", e)
             }
@@ -1070,15 +1076,32 @@ class MainActivity : AppCompatActivity() {
                 .build()
 
             customTabsIntent.intent.setPackage(ctPackage)
-            Log.d("W2N_AUTH", "Opening Chrome Custom Tab via package: $ctPackage for url=$url")
-            customTabsIntent.launchUrl(this, Uri.parse(url))
+            Log.d("W2N_AUTH", "Opening Chrome Custom Tab via package: $ctPackage for url=$taggedUrl")
+            customTabsIntent.launchUrl(this, Uri.parse(taggedUrl))
         } catch (e: Exception) {
             Log.e("W2N_AUTH", "Chrome Custom Tab launch failed", e)
             try {
-                webView.post { webView.loadUrl(url) }
+                webView.post { webView.loadUrl(taggedUrl) }
             } catch (e2: Exception) {
                 Log.e("W2N_AUTH", "All navigation methods failed", e2)
             }
+        }
+    }
+
+    /**
+     * Append `?w2n_app=1` (or `&w2n_app=1`) to a URL so the website can detect
+     * that the current browser tab was opened from this native app's CCT.
+     */
+    private fun appendW2NAppMarker(url: String): String {
+        return try {
+            if (Regex("[?&]w2n_app=1(?![\\w-])").containsMatchIn(url)) return url
+            val hashIdx = url.indexOf('#')
+            val base = if (hashIdx >= 0) url.substring(0, hashIdx) else url
+            val frag = if (hashIdx >= 0) url.substring(hashIdx) else ""
+            val sep = if (base.contains('?')) "&" else "?"
+            base + sep + "w2n_app=1" + frag
+        } catch (_: Throwable) {
+            url
         }
     }
 
@@ -1447,10 +1470,11 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Throwable) { /* best effort */ }
         super.onCreate(savedInstanceState)
 
-        // === PREDICTIVE BACK SUPPORT (Android 13+) ===
-        // The manifest sets android:enableOnBackInvokedCallback="true", so the legacy
-        // onKeyDown() back handling below is ignored on Android 13+. Register a
-        // dispatcher callback so back navigates WebView history instead of finishing.
+        // === PREDICTIVE BACK (Android 13+) ===
+        // The manifest sets android:enableOnBackInvokedCallback="true", so on API 33+
+        // the system routes back through OnBackInvokedDispatcher and stops calling
+        // onKeyDown/onBackPressed. Register a callback via the androidx dispatcher so
+        // back navigates the WebView history instead of closing the app on all versions.
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 if (this@MainActivity::webView.isInitialized && webView.canGoBack()) {
@@ -1461,6 +1485,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         })
+
 
         // === SPLASH-ON HANDOFF ===
         // If a custom splash is configured, paint the entire window (background +
@@ -1773,6 +1798,10 @@ class MainActivity : AppCompatActivity() {
 
         // JavaScript bridge — allows websites to detect native app
         webView.addJavascriptInterface(WebToNativeBridge(), "WebToNative")
+        // Add-on Pack v1 — native share bridge (zero-config for site authors)
+        if (BuildConfig.NATIVE_SHARE_ENABLED) {
+            webView.addJavascriptInterface(NativeBridge(this), NativeBridge.NAME)
+        }
 
         // File download support via DownloadManager
         webView.setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
@@ -1799,6 +1828,16 @@ class MainActivity : AppCompatActivity() {
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                 val url = request?.url?.toString() ?: return false
                 Log.d("W2N_NAV", "WebViewClient.shouldOverrideUrlLoading: $url")
+                // Add-on Pack v1: URL policy decides first; fall through when "auto".
+                UrlPolicy.shouldOpenExternally(url)?.let { ext ->
+                    if (ext) {
+                        Log.d("W2N_NAV", "URL policy → external: $url")
+                        return try { openInChromeCustomTab(url, "url_policy"); true } catch (_: Throwable) { false }
+                    } else {
+                        Log.d("W2N_NAV", "URL policy → in-app: $url")
+                        return false
+                    }
+                }
                 return shouldOverrideNavigation(url)
             }
 
@@ -1869,6 +1908,11 @@ class MainActivity : AppCompatActivity() {
                 pullRefreshJsAtTop = false
                 try { view?.evaluateJavascript(PULL_REFRESH_GUARD_JS, null) } catch (_: Throwable) { }
 
+
+                // Add-on Pack v1: auto-upgrade navigator.share() to the native bridge.
+                if (BuildConfig.NATIVE_SHARE_ENABLED) {
+                    try { view?.evaluateJavascript(NativeBridge.SHIM_JS, null) } catch (_: Throwable) { }
+                }
 
                 // Remote telemetry for page loads during/after OAuth
                 if (webViewManagedAuthInProgress || lastCustomTabReason == "oauth") {
@@ -2081,6 +2125,12 @@ class MainActivity : AppCompatActivity() {
                             return true
                         }
 
+                        if (webViewManagedAuthInProgress) {
+                            Log.d("W2N_AUTH", "Popup unknown host during sign-in — keeping in app")
+                            this@MainActivity.webView.loadUrl(url)
+                            popupDialog.dismiss()
+                            return true
+                        }
                         Log.d("W2N_AUTH", "Popup external URL — opening Chrome Custom Tab")
                         openInChromeCustomTab(url)
                         popupDialog.dismiss()
@@ -2117,6 +2167,12 @@ class MainActivity : AppCompatActivity() {
                             return
                         }
 
+                        if (webViewManagedAuthInProgress) {
+                            Log.d("W2N_AUTH", "Popup unknown host during sign-in — keeping in app")
+                            this@MainActivity.webView.loadUrl(url)
+                            popupDialog.dismiss()
+                            return
+                        }
                         Log.d("W2N_AUTH", "Popup landed on external URL — opening Chrome Custom Tab")
                         openInChromeCustomTab(url)
                         popupDialog.dismiss()
@@ -2442,6 +2498,9 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
 
+        // Add-on Pack v1: maybe show the native In-App Review prompt.
+        try { ReviewManager.maybeShow(this) } catch (_: Throwable) { }
+
         Log.d("W2N_AUTH", "┌─ onResume ──────────────────────────────")
         Log.d("W2N_AUTH", "│ wasInBackground=$wasInBackground")
         Log.d("W2N_AUTH", "│ skipNextResumeReload=$skipNextResumeReload")
@@ -2544,7 +2603,6 @@ class MainActivity : AppCompatActivity() {
                 try { swipeRefresh.isEnabled = atTop } catch (_: Throwable) { }
             }
         }
-
 
 
         @JavascriptInterface
