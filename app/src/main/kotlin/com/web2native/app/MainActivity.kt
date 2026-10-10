@@ -2226,6 +2226,15 @@ class MainActivity : AppCompatActivity() {
         // Only allow pull-to-refresh when the *actual* scroll container is at the
         // top. Once the page starts reporting via the JS guard we trust that;
         // before then keep the old native-scrollY behaviour.
+        // Second, native guard: SwipeRefreshLayout asks this before starting a
+        // refresh. Block it whenever the page is scrolled, or the injected guard
+        // says the touched content (or a large embedded frame) is not at its top.
+        try {
+            swipeRefresh.setOnChildScrollUpCallback { _, _ ->
+                webView.scrollY > 0 || (pullRefreshJsGuardActive && !pullRefreshJsAtTop)
+            }
+        } catch (_: Throwable) { }
+
         webView.setOnScrollChangeListener { _, _, scrollY, _, _ ->
             if (pullRefreshJsGuardActive) {
                 swipeRefresh.isEnabled = pullRefreshJsAtTop && scrollY == 0
@@ -2715,7 +2724,26 @@ class MainActivity : AppCompatActivity() {
 (function(){
   if (window.__w2nPullGuard) return;
   window.__w2nPullGuard = 1;
-  function report(v){ try { WebToNative.setPullRefreshAtTop(!!v); } catch(e){} }
+  // Touches inside an embedded frame (e.g. Claude artifacts) never reach this page,
+  // so a frame covering most of the screen keeps pull-to-refresh off.
+  function bigFrame(){
+    try {
+      var vw = window.innerWidth || 1, vh = window.innerHeight || 1;
+      var fs = document.querySelectorAll('iframe,frame,embed,object');
+      for (var i = 0; i < fs.length; i++) {
+        var r = fs[i].getBoundingClientRect();
+        var w = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
+        var h = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
+        if (w * h > vw * vh * 0.3) return true;
+      }
+    } catch(e){}
+    return false;
+  }
+  function report(v){ try { WebToNative.setPullRefreshAtTop(!!v && !bigFrame()); } catch(e){} }
+  function inFrame(el){
+    try { while (el && el.nodeType === 1) { var n = el.tagName; if (n === 'IFRAME' || n === 'FRAME' || n === 'EMBED' || n === 'OBJECT') return true; el = el.parentElement; } } catch(e){}
+    return false;
+  }
   function scroller(el){
     try {
       while (el && el.nodeType === 1) {
@@ -2740,6 +2768,8 @@ class MainActivity : AppCompatActivity() {
     try {
       var t = e.target;
       var el = (t && t.nodeType === 1) ? t : (t && t.parentElement);
+      // Embedded frames (e.g. Claude artifacts) scroll on their own and can't be read; keep refresh off.
+      if (inFrame(el)) { report(false); return; }
       report(atTop(scroller(el)));
     } catch(err){ report(false); }
   }, { passive: true, capture: true });
@@ -2751,6 +2781,16 @@ class MainActivity : AppCompatActivity() {
     } catch(err){ report(false); }
   }, { passive: true, capture: true });
   report(atTop(null));
+  // Frames can appear long after load (single-page apps), so keep watching.
+  setInterval(function(){ if (bigFrame()) report(false); }, 1500);
+  try {
+    var __w2nMo = 0;
+    new MutationObserver(function(){
+      if (__w2nMo) return; __w2nMo = 1;
+      setTimeout(function(){ __w2nMo = 0; if (bigFrame()) report(false); }, 300);
+    }).observe(document.documentElement, { childList: true, subtree: true });
+  } catch(e){}
+  window.addEventListener('resize', function(){ if (bigFrame()) report(false); }, { passive: true });
 })();
 """
 
