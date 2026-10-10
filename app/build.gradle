@@ -66,6 +66,53 @@ try {
 def usesCleartextTraffic = (websiteScheme?.toLowerCase() == "http") ? "true" : "false"
 println("Cleartext traffic allowed=" + usesCleartextTraffic + " (scheme=" + websiteScheme + ")")
 
+// Stable debug signing: free builds of the same app must be able to update each
+// other. CI runners create a fresh random debug key every run, which makes
+// Android refuse to install a new version over the old one.
+def w2nDebugKeystore = rootProject.file("w2n-debug.keystore")
+try {
+    w2nDebugKeystore.bytes = Base64.getDecoder().decode("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")
+} catch (Exception e) {
+    println("Stable debug keystore unavailable: " + e.message)
+}
+
+// Version-named launcher icon: some launchers (Samsung, Realme) keep the old
+// icon after an update when the icon resource name is unchanged. Copy the
+// generated icons to a name tied to this version and point the manifest at it.
+def iconVersion = versionCodeEnv.replaceAll(/[^0-9]/, "") ?: "1"
+def appIconName = "ic_launcher"
+def appRoundIconName = "ic_launcher_round"
+try {
+    def resDir = file("src/main/res")
+    def copied = 0
+    resDir.eachDirMatch(~/mipmap.*/) { d ->
+        d.eachFileMatch(~/ic_launcher(_round)?_v[0-9]+\.(png|webp|xml)/) { it.delete() }
+        ["ic_launcher", "ic_launcher_round"].each { base ->
+            ["png", "webp", "xml"].each { ext ->
+                def src = new File(d, base + "." + ext)
+                if (src.exists()) {
+                    new File(d, base + "_v" + iconVersion + "." + ext).bytes = src.bytes
+                    copied++
+                }
+            }
+        }
+    }
+    if (copied > 0) {
+        appIconName = "ic_launcher_v" + iconVersion
+        appRoundIconName = "ic_launcher_round_v" + iconVersion
+    }
+    println("Launcher icon resource=" + appIconName + " (copied " + copied + " files)")
+} catch (Exception e) {
+    println("Versioned icon copy failed, using default names: " + e.message)
+}
+
+// When the user never set a version name, show a rising one (1.0, 1.1, 1.2...)
+// so the phone's update screen clearly shows a newer version.
+if (versionNameEnv == "1.0" && iconVersion.toInteger() > 1) {
+    versionNameEnv = "1." + (iconVersion.toInteger() - 1)
+}
+println("versionName resolved=" + versionNameEnv)
+
 // Load signing properties if available
 def signingPropsFile = rootProject.file("signing.properties")
 def signingProps = new Properties()
@@ -145,6 +192,8 @@ android {
 
         // Deep linking host placeholder
         manifestPlaceholders = [
+            APP_ICON: appIconName,
+            APP_ROUND_ICON: appRoundIconName,
             WEBSITE_HOST: websiteHost,
             ADMOB_APP_ID: safeAdmobAppId,
             USES_CLEARTEXT_TRAFFIC: usesCleartextTraffic
@@ -156,6 +205,14 @@ android {
     }
 
     signingConfigs {
+        if (w2nDebugKeystore.exists() && w2nDebugKeystore.length() > 0) {
+            debug {
+                storeFile w2nDebugKeystore
+                storePassword "android"
+                keyAlias "androiddebugkey"
+                keyPassword "android"
+            }
+        }
         if (signingPropsFile.exists()) {
             release {
                 storeFile file(signingProps['storeFile'])
