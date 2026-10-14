@@ -111,6 +111,36 @@ class MainActivity : AppCompatActivity() {
         Log.d("W2N_NOTIF", "Notification permission ${if (granted) "GRANTED" else "DENIED"}")
     }
 
+    // WebView media permission (mic, and camera for live video) requested by
+    // the website via getUserMedia. Fail-safe: any error denies, as before.
+    private var pendingWebPermissionRequest: PermissionRequest? = null
+    private val webMediaPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { _ ->
+        val req = pendingWebPermissionRequest
+        pendingWebPermissionRequest = null
+        if (req != null) grantWebPermissionRequest(req)
+    }
+
+    private fun androidPermissionForWebResource(resource: String): String? = when (resource) {
+        PermissionRequest.RESOURCE_AUDIO_CAPTURE -> Manifest.permission.RECORD_AUDIO
+        PermissionRequest.RESOURCE_VIDEO_CAPTURE -> Manifest.permission.CAMERA
+        else -> null
+    }
+
+    private fun grantWebPermissionRequest(request: PermissionRequest) {
+        try {
+            val allowed = request.resources.filter { r ->
+                val perm = androidPermissionForWebResource(r)
+                perm != null && ContextCompat.checkSelfPermission(this, perm) == PackageManager.PERMISSION_GRANTED
+            }
+            if (allowed.isNotEmpty()) request.grant(allowed.toTypedArray()) else request.deny()
+            Log.d("W2N_MEDIA", "Web media permission granted=$allowed")
+        } catch (e: Throwable) {
+            try { request.deny() } catch (_: Throwable) { }
+        }
+    }
+
     private fun requestNotificationPermissionIfNeeded() {
         if (!BuildConfig.PUSH_ENABLED) return
         if (Build.VERSION.SDK_INT < 33) return // TIRAMISU
@@ -2196,6 +2226,41 @@ class MainActivity : AppCompatActivity() {
                 resultMsg.sendToTarget()
                 Log.d("W2N_AUTH", "Popup window created")
                 return true
+            }
+
+            override fun onPermissionRequest(request: PermissionRequest?) {
+                if (request == null) return
+                runOnUiThread {
+                    try {
+                        val needed = request.resources
+                            .mapNotNull { androidPermissionForWebResource(it) }
+                            .distinct()
+                        if (needed.isEmpty()) {
+                            request.deny()
+                        } else {
+                            val missing = needed.filter {
+                                ContextCompat.checkSelfPermission(this@MainActivity, it) !=
+                                    PackageManager.PERMISSION_GRANTED
+                            }
+                            if (missing.isEmpty()) {
+                                grantWebPermissionRequest(request)
+                            } else {
+                                pendingWebPermissionRequest?.let { old ->
+                                    try { old.deny() } catch (_: Throwable) { }
+                                }
+                                pendingWebPermissionRequest = request
+                                webMediaPermissionLauncher.launch(missing.toTypedArray())
+                            }
+                        }
+                    } catch (e: Throwable) {
+                        Log.w("W2N_MEDIA", "Web media permission failed: ${e.message}")
+                        try { request.deny() } catch (_: Throwable) { }
+                    }
+                }
+            }
+
+            override fun onPermissionRequestCanceled(request: PermissionRequest?) {
+                if (pendingWebPermissionRequest === request) pendingWebPermissionRequest = null
             }
 
             override fun onShowFileChooser(
