@@ -293,34 +293,15 @@ workflows:
           if [ -n "$ICON_URL" ]; then
             echo "Custom icon URL detected. Processing icon..."
             if curl -fsSL -o /tmp/icon_source "$ICON_URL" && identify /tmp/icon_source > /dev/null 2>&1; then
-              # Normalize orientation and add an alpha channel.
               convert /tmp/icon_source -auto-orient -background none -alpha set /tmp/icon_oriented.png
-              # Decide the background from the ORIGINAL upload's corners (before any trim):
-              #   opaque corners      -> logo has its own solid background: keep it whole
-              #                          (never trim it) and fill around it with that colour.
-              #   transparent corners -> trim only see-through padding, fill with app theme colour.
-              # Never fall back to black/dark.
-              CORNER_ALPHA=$(convert /tmp/icon_oriented.png -gravity NorthWest -crop 8x8+0+0 +repage \
-                -resize 1x1\! -format "%[fx:int(a*100)]" info: 2>/dev/null || echo "100")
-              if [ "${CORNER_ALPHA:-100}" -ge 50 ]; then
-                SAMPLED_BG=$(convert /tmp/icon_oriented.png -gravity NorthWest -crop 8x8+0+0 +repage \
-                  -resize 1x1\! -alpha off -format "#%[hex:p{0,0}]" info: 2>/dev/null || echo "")
-                if [ -n "$SAMPLED_BG" ] && [ "$SAMPLED_BG" != "#" ]; then
-                  ICON_BG_COLOR="$SAMPLED_BG"
-                fi
-                echo "Icon has solid background; keeping it whole. bg=$ICON_BG_COLOR"
-                cp /tmp/icon_oriented.png /tmp/icon_trimmed.png
-              else
-                echo "Icon has transparent edges; trimming see-through padding only. bg=$ICON_BG_COLOR (theme)"
-                convert /tmp/icon_oriented.png -bordercolor none -border 1 -trim +repage /tmp/icon_trimmed.png
-              fi
-              echo "Prepared icon: $(identify -format '%wx%h' /tmp/icon_trimmed.png)"
+              convert /tmp/icon_oriented.png -fuzz 10% -trim +repage /tmp/icon_trimmed.png
+              echo "Trimmed icon: $(identify -format '%wx%h' /tmp/icon_trimmed.png)"
               SRC_W=$(identify -format "%w" /tmp/icon_trimmed.png)
               SRC_H=$(identify -format "%h" /tmp/icon_trimmed.png)
               MAX=$(( SRC_W > SRC_H ? SRC_W : SRC_H ))
-              convert /tmp/icon_trimmed.png -background "$ICON_BG_COLOR" -gravity center -extent ${MAX}x${MAX} /tmp/icon_square.png
-              convert /tmp/icon_square.png -background "$ICON_BG_COLOR" -alpha remove -alpha off -gravity center -resize 820x820 -extent 1024x1024 /tmp/icon_legacy_base.png
-              convert /tmp/icon_square.png -background none -gravity center -resize 700x700 -extent 1024x1024 /tmp/icon_foreground_base.png
+              convert /tmp/icon_trimmed.png -background none -gravity center -extent ${MAX}x${MAX} /tmp/icon_square.png
+              convert /tmp/icon_square.png -background white -alpha remove -alpha off -gravity center -resize 820x820 -extent 1024x1024 /tmp/icon_legacy_base.png
+              convert /tmp/icon_square.png -background none -gravity center -resize 680x680 -extent 1024x1024 /tmp/icon_foreground_base.png
             else
               echo "Icon download failed. Falling back to default icon."
               generate_default_icon
@@ -335,9 +316,9 @@ workflows:
             size=$(echo "$pair" | cut -d: -f2)
             fg=$(echo "$pair" | cut -d: -f3)
             mkdir -p app/src/main/res/mipmap-$density
-            convert /tmp/icon_legacy_base.png -resize ${size}x${size} -gravity center -background "$ICON_BG_COLOR" -extent ${size}x${size} app/src/main/res/mipmap-$density/ic_launcher.png || true
+            convert /tmp/icon_legacy_base.png -resize ${size}x${size} -gravity center -background white -extent ${size}x${size} app/src/main/res/mipmap-$density/ic_launcher.png || true
             HALF=$((size / 2))
-            convert /tmp/icon_legacy_base.png -resize ${size}x${size} -gravity center -background "$ICON_BG_COLOR" -extent ${size}x${size} \
+            convert /tmp/icon_legacy_base.png -resize ${size}x${size} -gravity center -background white -extent ${size}x${size} \
               \( +clone -threshold -1 -negate -fill white -draw "circle ${HALF},${HALF} ${HALF},0" \) \
               -alpha off -compose copy_opacity -composite \
               app/src/main/res/mipmap-$density/ic_launcher_round.png || true
