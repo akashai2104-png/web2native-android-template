@@ -111,36 +111,6 @@ class MainActivity : AppCompatActivity() {
         Log.d("W2N_NOTIF", "Notification permission ${if (granted) "GRANTED" else "DENIED"}")
     }
 
-    // WebView media permission (mic, and camera for live video) requested by
-    // the website via getUserMedia. Fail-safe: any error denies, as before.
-    private var pendingWebPermissionRequest: PermissionRequest? = null
-    private val webMediaPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { _ ->
-        val req = pendingWebPermissionRequest
-        pendingWebPermissionRequest = null
-        if (req != null) grantWebPermissionRequest(req)
-    }
-
-    private fun androidPermissionForWebResource(resource: String): String? = when (resource) {
-        PermissionRequest.RESOURCE_AUDIO_CAPTURE -> Manifest.permission.RECORD_AUDIO
-        PermissionRequest.RESOURCE_VIDEO_CAPTURE -> Manifest.permission.CAMERA
-        else -> null
-    }
-
-    private fun grantWebPermissionRequest(request: PermissionRequest) {
-        try {
-            val allowed = request.resources.filter { r ->
-                val perm = androidPermissionForWebResource(r)
-                perm != null && ContextCompat.checkSelfPermission(this, perm) == PackageManager.PERMISSION_GRANTED
-            }
-            if (allowed.isNotEmpty()) request.grant(allowed.toTypedArray()) else request.deny()
-            Log.d("W2N_MEDIA", "Web media permission granted=$allowed")
-        } catch (e: Throwable) {
-            try { request.deny() } catch (_: Throwable) { }
-        }
-    }
-
     private fun requestNotificationPermissionIfNeeded() {
         if (!BuildConfig.PUSH_ENABLED) return
         if (Build.VERSION.SDK_INT < 33) return // TIRAMISU
@@ -346,8 +316,8 @@ class MainActivity : AppCompatActivity() {
     private fun applyBrandingVisibility(brandingWatermark: TextView?, show: Boolean) {
         if (brandingWatermark == null) return
         if (show) {
-            // Branding bar is always brand blue with white text, independent of
-            // the user-selected theme/status-bar color. Free-tier only.
+            // Branding bar is always brand blue with white text, independent of the
+            // user-selected theme/status-bar color. Free-tier only.
             brandingWatermark.setBackgroundColor(Color.parseColor("#1D4ED8"))
             brandingWatermark.setTextColor(Color.WHITE)
             brandingWatermark.visibility = View.VISIBLE
@@ -860,9 +830,7 @@ class MainActivity : AppCompatActivity() {
             "supabase.co",
             "supabase.com",
             "lovable.dev",
-            "lovable.app",
-            "base44.app",
-            "base44.com"
+            "lovable.app"
         )
 
         return oauthHosts.any { host == it || host.endsWith(".$it") }
@@ -892,8 +860,7 @@ class MainActivity : AppCompatActivity() {
             "response_type",
             "scope",
             "code_challenge",
-            "state",
-            "from_url"
+            "state"
         ).any { uri.getQueryParameter(it) != null }
 
         val genericAuthPath = path.contains("/auth") || path.contains("/oauth") || path.contains("/authorize")
@@ -1073,17 +1040,14 @@ class MainActivity : AppCompatActivity() {
      * Opens a URL in Chrome Custom Tab (used for non-OAuth external links).
      */
     private fun openInChromeCustomTab(url: String, reason: String = "external") {
-        // Tag every CCT launch from this app so the web side can distinguish it from
-        // regular Android Chrome and only then show the "Continue to App" overlay.
-        val taggedUrl = appendW2NAppMarker(url)
         val ctPackage = getCustomTabsPackage()
 
         if (reason == "oauth") {
-            lastCustomTabUrl = taggedUrl
+            lastCustomTabUrl = url
             lastCustomTabReason = reason
             lastCustomTabOpenedAtMs = System.currentTimeMillis()
             postAuthDiagnostic("oauth_cct_launch_attempt", mapOf(
-                "url" to taggedUrl,
+                "url" to url,
                 "reason" to reason,
                 "customTabsPackage" to ctPackage,
             ))
@@ -1092,7 +1056,7 @@ class MainActivity : AppCompatActivity() {
         if (ctPackage == null) {
             Log.w("W2N_AUTH", "No Custom Tabs provider found — loading URL in WebView")
             try {
-                webView.post { webView.loadUrl(taggedUrl) }
+                webView.post { webView.loadUrl(url) }
             } catch (e: Exception) {
                 Log.e("W2N_AUTH", "WebView fallback failed", e)
             }
@@ -1106,32 +1070,15 @@ class MainActivity : AppCompatActivity() {
                 .build()
 
             customTabsIntent.intent.setPackage(ctPackage)
-            Log.d("W2N_AUTH", "Opening Chrome Custom Tab via package: $ctPackage for url=$taggedUrl")
-            customTabsIntent.launchUrl(this, Uri.parse(taggedUrl))
+            Log.d("W2N_AUTH", "Opening Chrome Custom Tab via package: $ctPackage for url=$url")
+            customTabsIntent.launchUrl(this, Uri.parse(url))
         } catch (e: Exception) {
             Log.e("W2N_AUTH", "Chrome Custom Tab launch failed", e)
             try {
-                webView.post { webView.loadUrl(taggedUrl) }
+                webView.post { webView.loadUrl(url) }
             } catch (e2: Exception) {
                 Log.e("W2N_AUTH", "All navigation methods failed", e2)
             }
-        }
-    }
-
-    /**
-     * Append `?w2n_app=1` (or `&w2n_app=1`) to a URL so the website can detect
-     * that the current browser tab was opened from this native app's CCT.
-     */
-    private fun appendW2NAppMarker(url: String): String {
-        return try {
-            if (Regex("[?&]w2n_app=1(?![\\w-])").containsMatchIn(url)) return url
-            val hashIdx = url.indexOf('#')
-            val base = if (hashIdx >= 0) url.substring(0, hashIdx) else url
-            val frag = if (hashIdx >= 0) url.substring(hashIdx) else ""
-            val sep = if (base.contains('?')) "&" else "?"
-            base + sep + "w2n_app=1" + frag
-        } catch (_: Throwable) {
-            url
         }
     }
 
@@ -1500,11 +1447,10 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Throwable) { /* best effort */ }
         super.onCreate(savedInstanceState)
 
-        // === PREDICTIVE BACK (Android 13+) ===
-        // The manifest sets android:enableOnBackInvokedCallback="true", so on API 33+
-        // the system routes back through OnBackInvokedDispatcher and stops calling
-        // onKeyDown/onBackPressed. Register a callback via the androidx dispatcher so
-        // back navigates the WebView history instead of closing the app on all versions.
+        // === PREDICTIVE BACK SUPPORT (Android 13+) ===
+        // The manifest sets android:enableOnBackInvokedCallback="true", so the legacy
+        // onKeyDown() back handling below is ignored on Android 13+. Register a
+        // dispatcher callback so back navigates WebView history instead of finishing.
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 if (this@MainActivity::webView.isInitialized && webView.canGoBack()) {
@@ -1515,7 +1461,6 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         })
-
 
         // === SPLASH-ON HANDOFF ===
         // If a custom splash is configured, paint the entire window (background +
@@ -1828,10 +1773,6 @@ class MainActivity : AppCompatActivity() {
 
         // JavaScript bridge — allows websites to detect native app
         webView.addJavascriptInterface(WebToNativeBridge(), "WebToNative")
-        // Add-on Pack v1 — native share bridge (zero-config for site authors)
-        if (BuildConfig.NATIVE_SHARE_ENABLED) {
-            webView.addJavascriptInterface(NativeBridge(this), NativeBridge.NAME)
-        }
 
         // File download support via DownloadManager
         webView.setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
@@ -1858,16 +1799,6 @@ class MainActivity : AppCompatActivity() {
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                 val url = request?.url?.toString() ?: return false
                 Log.d("W2N_NAV", "WebViewClient.shouldOverrideUrlLoading: $url")
-                // Add-on Pack v1: URL policy decides first; fall through when "auto".
-                UrlPolicy.shouldOpenExternally(url)?.let { ext ->
-                    if (ext) {
-                        Log.d("W2N_NAV", "URL policy → external: $url")
-                        return try { openInChromeCustomTab(url, "url_policy"); true } catch (_: Throwable) { false }
-                    } else {
-                        Log.d("W2N_NAV", "URL policy → in-app: $url")
-                        return false
-                    }
-                }
                 return shouldOverrideNavigation(url)
             }
 
@@ -1938,11 +1869,6 @@ class MainActivity : AppCompatActivity() {
                 pullRefreshJsAtTop = false
                 try { view?.evaluateJavascript(PULL_REFRESH_GUARD_JS, null) } catch (_: Throwable) { }
 
-
-                // Add-on Pack v1: auto-upgrade navigator.share() to the native bridge.
-                if (BuildConfig.NATIVE_SHARE_ENABLED) {
-                    try { view?.evaluateJavascript(NativeBridge.SHIM_JS, null) } catch (_: Throwable) { }
-                }
 
                 // Remote telemetry for page loads during/after OAuth
                 if (webViewManagedAuthInProgress || lastCustomTabReason == "oauth") {
@@ -2155,12 +2081,6 @@ class MainActivity : AppCompatActivity() {
                             return true
                         }
 
-                        if (webViewManagedAuthInProgress) {
-                            Log.d("W2N_AUTH", "Popup unknown host during sign-in — keeping in app")
-                            this@MainActivity.webView.loadUrl(url)
-                            popupDialog.dismiss()
-                            return true
-                        }
                         Log.d("W2N_AUTH", "Popup external URL — opening Chrome Custom Tab")
                         openInChromeCustomTab(url)
                         popupDialog.dismiss()
@@ -2197,12 +2117,6 @@ class MainActivity : AppCompatActivity() {
                             return
                         }
 
-                        if (webViewManagedAuthInProgress) {
-                            Log.d("W2N_AUTH", "Popup unknown host during sign-in — keeping in app")
-                            this@MainActivity.webView.loadUrl(url)
-                            popupDialog.dismiss()
-                            return
-                        }
                         Log.d("W2N_AUTH", "Popup landed on external URL — opening Chrome Custom Tab")
                         openInChromeCustomTab(url)
                         popupDialog.dismiss()
@@ -2226,41 +2140,6 @@ class MainActivity : AppCompatActivity() {
                 resultMsg.sendToTarget()
                 Log.d("W2N_AUTH", "Popup window created")
                 return true
-            }
-
-            override fun onPermissionRequest(request: PermissionRequest?) {
-                if (request == null) return
-                runOnUiThread {
-                    try {
-                        val needed = request.resources
-                            .mapNotNull { androidPermissionForWebResource(it) }
-                            .distinct()
-                        if (needed.isEmpty()) {
-                            request.deny()
-                        } else {
-                            val missing = needed.filter {
-                                ContextCompat.checkSelfPermission(this@MainActivity, it) !=
-                                    PackageManager.PERMISSION_GRANTED
-                            }
-                            if (missing.isEmpty()) {
-                                grantWebPermissionRequest(request)
-                            } else {
-                                pendingWebPermissionRequest?.let { old ->
-                                    try { old.deny() } catch (_: Throwable) { }
-                                }
-                                pendingWebPermissionRequest = request
-                                webMediaPermissionLauncher.launch(missing.toTypedArray())
-                            }
-                        }
-                    } catch (e: Throwable) {
-                        Log.w("W2N_MEDIA", "Web media permission failed: ${e.message}")
-                        try { request.deny() } catch (_: Throwable) { }
-                    }
-                }
-            }
-
-            override fun onPermissionRequestCanceled(request: PermissionRequest?) {
-                if (pendingWebPermissionRequest === request) pendingWebPermissionRequest = null
             }
 
             override fun onShowFileChooser(
@@ -2291,15 +2170,6 @@ class MainActivity : AppCompatActivity() {
         // Only allow pull-to-refresh when the *actual* scroll container is at the
         // top. Once the page starts reporting via the JS guard we trust that;
         // before then keep the old native-scrollY behaviour.
-        // Second, native guard: SwipeRefreshLayout asks this before starting a
-        // refresh. Block it whenever the page is scrolled, or the injected guard
-        // says the touched content (or a large embedded frame) is not at its top.
-        try {
-            swipeRefresh.setOnChildScrollUpCallback { _, _ ->
-                webView.scrollY > 0 || (pullRefreshJsGuardActive && !pullRefreshJsAtTop)
-            }
-        } catch (_: Throwable) { }
-
         webView.setOnScrollChangeListener { _, _, scrollY, _, _ ->
             if (pullRefreshJsGuardActive) {
                 swipeRefresh.isEnabled = pullRefreshJsAtTop && scrollY == 0
@@ -2572,9 +2442,6 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
 
-        // Add-on Pack v1: maybe show the native In-App Review prompt.
-        try { ReviewManager.maybeShow(this) } catch (_: Throwable) { }
-
         Log.d("W2N_AUTH", "┌─ onResume ──────────────────────────────")
         Log.d("W2N_AUTH", "│ wasInBackground=$wasInBackground")
         Log.d("W2N_AUTH", "│ skipNextResumeReload=$skipNextResumeReload")
@@ -2677,6 +2544,7 @@ class MainActivity : AppCompatActivity() {
                 try { swipeRefresh.isEnabled = atTop } catch (_: Throwable) { }
             }
         }
+
 
 
         @JavascriptInterface
@@ -2789,26 +2657,7 @@ class MainActivity : AppCompatActivity() {
 (function(){
   if (window.__w2nPullGuard) return;
   window.__w2nPullGuard = 1;
-  // Touches inside an embedded frame (e.g. Claude artifacts) never reach this page,
-  // so a frame covering most of the screen keeps pull-to-refresh off.
-  function bigFrame(){
-    try {
-      var vw = window.innerWidth || 1, vh = window.innerHeight || 1;
-      var fs = document.querySelectorAll('iframe,frame,embed,object');
-      for (var i = 0; i < fs.length; i++) {
-        var r = fs[i].getBoundingClientRect();
-        var w = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
-        var h = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
-        if (w * h > vw * vh * 0.3) return true;
-      }
-    } catch(e){}
-    return false;
-  }
-  function report(v){ try { WebToNative.setPullRefreshAtTop(!!v && !bigFrame()); } catch(e){} }
-  function inFrame(el){
-    try { while (el && el.nodeType === 1) { var n = el.tagName; if (n === 'IFRAME' || n === 'FRAME' || n === 'EMBED' || n === 'OBJECT') return true; el = el.parentElement; } } catch(e){}
-    return false;
-  }
+  function report(v){ try { WebToNative.setPullRefreshAtTop(!!v); } catch(e){} }
   function scroller(el){
     try {
       while (el && el.nodeType === 1) {
@@ -2833,8 +2682,6 @@ class MainActivity : AppCompatActivity() {
     try {
       var t = e.target;
       var el = (t && t.nodeType === 1) ? t : (t && t.parentElement);
-      // Embedded frames (e.g. Claude artifacts) scroll on their own and can't be read; keep refresh off.
-      if (inFrame(el)) { report(false); return; }
       report(atTop(scroller(el)));
     } catch(err){ report(false); }
   }, { passive: true, capture: true });
@@ -2846,16 +2693,6 @@ class MainActivity : AppCompatActivity() {
     } catch(err){ report(false); }
   }, { passive: true, capture: true });
   report(atTop(null));
-  // Frames can appear long after load (single-page apps), so keep watching.
-  setInterval(function(){ if (bigFrame()) report(false); }, 1500);
-  try {
-    var __w2nMo = 0;
-    new MutationObserver(function(){
-      if (__w2nMo) return; __w2nMo = 1;
-      setTimeout(function(){ __w2nMo = 0; if (bigFrame()) report(false); }, 300);
-    }).observe(document.documentElement, { childList: true, subtree: true });
-  } catch(e){}
-  window.addEventListener('resize', function(){ if (bigFrame()) report(false); }, { passive: true });
 })();
 """
 
