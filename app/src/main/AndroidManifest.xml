@@ -5,9 +5,6 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
     <uses-permission android:name="android.permission.CAMERA" />
-    <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
-    <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <uses-feature android:name="android.hardware.camera" android:required="false" />
@@ -27,11 +24,11 @@
         android:enableOnBackInvokedCallback="true"
         android:extractNativeLibs="false"
         android:hardwareAccelerated="true"
-        android:icon="@mipmap/${APP_ICON}"
+        android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:largeHeap="true"
         android:resizeableActivity="true"
-        android:roundIcon="@mipmap/${APP_ROUND_ICON}"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.WebViewApp"
         android:usesCleartextTraffic="${USES_CLEARTEXT_TRAFFIC}"
