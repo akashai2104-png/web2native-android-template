@@ -410,39 +410,36 @@ jobs:
           if [ -n "$ICON_URL" ]; then
             echo "Custom icon URL detected. Processing icon..."
             if curl -fsSL -o /tmp/icon_source "$ICON_URL" && identify /tmp/icon_source > /dev/null 2>&1; then
-              # Normalize first, then trim outer transparent/white padding (common from AI-generated icons)
+              # Normalize orientation and add an alpha channel.
               convert /tmp/icon_source -auto-orient -background none -alpha set /tmp/icon_oriented.png
-              convert /tmp/icon_oriented.png -fuzz 10% -trim +repage /tmp/icon_trimmed.png
-              echo "Trimmed icon: $(identify -format '%wx%h' /tmp/icon_trimmed.png)"
-              # Force into a square canvas so subsequent resize+extent stays centered
-              SRC_W=$(identify -format "%w" /tmp/icon_trimmed.png)
-              SRC_H=$(identify -format "%h" /tmp/icon_trimmed.png)
-              MAX=$(( SRC_W > SRC_H ? SRC_W : SRC_H ))
-              convert /tmp/icon_trimmed.png -background none -gravity center -extent ${MAX}x${MAX} /tmp/icon_square.png
-              # Auto-detect background color from the icon corners.
-              #   1. Opaque corner -> sample its color (logo has solid bg, blend seamlessly).
-              #   2. Transparent corner -> measure logo's mean luminance and pick contrasting neutral.
-              #   3. Anything fails -> keep theme color / #1D4ED8 fallback already set above.
-              CORNER_ALPHA=$(convert /tmp/icon_square.png -gravity NorthWest -crop 32x32+0+0 +repage \
+              # Decide the background from the ORIGINAL upload's corners (before any trim):
+              #   opaque corners      -> logo has its own solid background: keep it whole
+              #                          (never trim it) and fill around it with that colour.
+              #   transparent corners -> trim only see-through padding, fill with app theme colour.
+              # Never fall back to black/dark.
+              CORNER_ALPHA=$(convert /tmp/icon_oriented.png -gravity NorthWest -crop 8x8+0+0 +repage \
                 -resize 1x1\! -format "%[fx:int(a*100)]" info: 2>/dev/null || echo "100")
               if [ "${CORNER_ALPHA:-100}" -ge 50 ]; then
-                SAMPLED_BG=$(convert /tmp/icon_square.png -gravity NorthWest -crop 32x32+0+0 +repage \
+                SAMPLED_BG=$(convert /tmp/icon_oriented.png -gravity NorthWest -crop 8x8+0+0 +repage \
                   -resize 1x1\! -alpha off -format "#%[hex:p{0,0}]" info: 2>/dev/null || echo "")
                 if [ -n "$SAMPLED_BG" ] && [ "$SAMPLED_BG" != "#" ]; then
                   ICON_BG_COLOR="$SAMPLED_BG"
-                  echo "Icon bg sampled from corner: $ICON_BG_COLOR"
                 fi
+                echo "Icon has solid background; keeping it whole. bg=$ICON_BG_COLOR"
+                cp /tmp/icon_oriented.png /tmp/icon_trimmed.png
               else
-                # Transparent corners: default to a dark canvas so dark logos blend
-                # edge-to-edge (no white bands). User can override via theme color
-                # if they explicitly want light.
-                ICON_BG_COLOR="#1a1a1a"
-                echo "Icon bg: dark (transparent corners, no white bands)"
+                echo "Icon has transparent edges; trimming see-through padding only. bg=$ICON_BG_COLOR (theme)"
+                convert /tmp/icon_oriented.png -bordercolor none -border 1 -trim +repage /tmp/icon_trimmed.png
               fi
+              echo "Prepared icon: $(identify -format '%wx%h' /tmp/icon_trimmed.png)"
+              SRC_W=$(identify -format "%w" /tmp/icon_trimmed.png)
+              SRC_H=$(identify -format "%h" /tmp/icon_trimmed.png)
+              MAX=$(( SRC_W > SRC_H ? SRC_W : SRC_H ))
+              convert /tmp/icon_trimmed.png -background "$ICON_BG_COLOR" -gravity center -extent ${MAX}x${MAX} /tmp/icon_square.png
               # Legacy icon: centered with safe padding so round/circle masks cannot make it look shifted
               convert /tmp/icon_square.png -background "$ICON_BG_COLOR" -alpha remove -alpha off -gravity center -resize 820x820 -extent 1024x1024 /tmp/icon_legacy_base.png
-              # Adaptive foreground: respect the ~66% safe zone (680/1024) so masks don't clip the logo
-              convert /tmp/icon_square.png -background none -gravity center -resize 680x680 -extent 1024x1024 /tmp/icon_foreground_base.png
+              # Adaptive foreground: ~68% safe zone (700/1024) so masks don't clip the logo
+              convert /tmp/icon_square.png -background none -gravity center -resize 700x700 -extent 1024x1024 /tmp/icon_foreground_base.png
               CUSTOM_ICON_USED="true"
             else
               echo "Icon download failed. Falling back to default icon."
