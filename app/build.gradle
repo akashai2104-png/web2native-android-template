@@ -66,6 +66,36 @@ try {
 def usesCleartextTraffic = (websiteScheme?.toLowerCase() == "http") ? "true" : "false"
 println("Cleartext traffic allowed=" + usesCleartextTraffic + " (scheme=" + websiteScheme + ")")
 
+// Version-named launcher icon: some launchers (Samsung, Realme) keep the old
+// icon after an update when the icon resource name is unchanged. Copy the
+// generated icons to a name tied to this version and point the manifest at it.
+def iconVersion = versionCodeEnv.replaceAll(/[^0-9]/, "") ?: "1"
+def appIconName = "ic_launcher"
+def appRoundIconName = "ic_launcher_round"
+try {
+    def resDir = file("src/main/res")
+    def copied = 0
+    resDir.eachDirMatch(~/mipmap.*/) { d ->
+        d.eachFileMatch(~/ic_launcher(_round)?_v[0-9]+\.(png|webp|xml)/) { it.delete() }
+        ["ic_launcher", "ic_launcher_round"].each { base ->
+            ["png", "webp", "xml"].each { ext ->
+                def src = new File(d, base + "." + ext)
+                if (src.exists()) {
+                    new File(d, base + "_v" + iconVersion + "." + ext).bytes = src.bytes
+                    copied++
+                }
+            }
+        }
+    }
+    if (copied > 0) {
+        appIconName = "ic_launcher_v" + iconVersion
+        appRoundIconName = "ic_launcher_round_v" + iconVersion
+    }
+    println("Launcher icon resource=" + appIconName + " (copied " + copied + " files)")
+} catch (Exception e) {
+    println("Versioned icon copy failed, using default names: " + e.message)
+}
+
 // Load signing properties if available
 def signingPropsFile = rootProject.file("signing.properties")
 def signingProps = new Properties()
@@ -145,6 +175,8 @@ android {
 
         // Deep linking host placeholder
         manifestPlaceholders = [
+            APP_ICON: appIconName,
+            APP_ROUND_ICON: appRoundIconName,
             WEBSITE_HOST: websiteHost,
             ADMOB_APP_ID: safeAdmobAppId,
             USES_CLEARTEXT_TRAFFIC: usesCleartextTraffic
