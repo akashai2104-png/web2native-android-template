@@ -1931,6 +1931,7 @@ class MainActivity : AppCompatActivity() {
                         view?.evaluateJavascript(js, null)
                     }
                 } catch (_: Exception) { }
+                try { view?.evaluateJavascript(FILE_SAVE_GUARD_JS, null) } catch (_: Throwable) { }
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
@@ -1949,6 +1950,9 @@ class MainActivity : AppCompatActivity() {
                 pullRefreshJsGuardActive = false
                 pullRefreshJsAtTop = false
                 try { view?.evaluateJavascript(PULL_REFRESH_GUARD_JS, null) } catch (_: Throwable) { }
+
+                // Page-made files: keep them alive and save at tap time.
+                try { view?.evaluateJavascript(FILE_SAVE_GUARD_JS, null) } catch (_: Throwable) { }
 
 
                 // Add-on Pack v1: auto-upgrade navigator.share() to the native bridge.
@@ -2669,6 +2673,73 @@ class MainActivity : AppCompatActivity() {
         webView.restoreState(savedInstanceState)
     }
 
+
+    /**
+     * Keeps page-made files (blob:) alive for 60 s after the site revokes them,
+     * and saves download-link files right at the tap, before the site can
+     * delete them. Guarded, idempotent, never throws into the page.
+     */
+    private val FILE_SAVE_GUARD_JS = """
+        (function(){
+          try {
+            if (window.__W2N_FILE_GUARD__) return;
+            if (!window.WebToNative || typeof window.WebToNative.saveBase64File !== 'function') return;
+            window.__W2N_FILE_GUARD__ = true;
+            function report(r){ try { if (typeof WebToNative.reportFileSaveIssue === 'function') WebToNative.reportFileSaveIssue(String(r)); } catch (e) {} }
+            try {
+              var rv = (window.URL && URL.revokeObjectURL) ? URL.revokeObjectURL.bind(URL) : null;
+              if (rv) {
+                URL.revokeObjectURL = function(u){
+                  try {
+                    if (typeof u === 'string' && u.indexOf('blob:') === 0) {
+                      setTimeout(function(){ try { rv(u); } catch (e) {} }, 60000);
+                      return;
+                    }
+                  } catch (e) {}
+                  return rv(u);
+                };
+              }
+            } catch (e) {}
+            function isPageFile(h){ return typeof h === 'string' && (h.indexOf('blob:') === 0 || h.indexOf('data:') === 0); }
+            function save(href, name){
+              fetch(href).then(function(r){ return r.blob(); }).then(function(b){
+                if (!b || !b.size) { report('empty file'); WebToNative.saveBase64File(name, '', ''); return; }
+                var fr = new FileReader();
+                fr.onloadend = function(){
+                  try {
+                    var s = String(fr.result || ''); var i = s.indexOf(',');
+                    WebToNative.saveBase64File(name, b.type || '', i >= 0 ? s.substring(i + 1) : s);
+                  } catch (e) { report('read failed'); try { WebToNative.saveBase64File(name, '', ''); } catch (_) {} }
+                };
+                fr.readAsDataURL(b);
+              }).catch(function(){ report('fetch failed'); try { WebToNative.saveBase64File(name, '', ''); } catch (_) {} });
+            }
+            function handle(a){
+              try {
+                if (!a || !a.hasAttribute || !a.hasAttribute('download')) return false;
+                var h = a.href || a.getAttribute('href') || '';
+                if (!isPageFile(h)) return false;
+                save(h, a.getAttribute('download') || '');
+                return true;
+              } catch (e) { return false; }
+            }
+            document.addEventListener('click', function(ev){
+              try {
+                var t = ev.target; var a = (t && t.closest) ? t.closest('a[download]') : null;
+                if (a && handle(a)) ev.preventDefault();
+              } catch (e) {}
+            }, true);
+            try {
+              var oc = HTMLAnchorElement.prototype.click;
+              HTMLAnchorElement.prototype.click = function(){
+                try { if (!this.isConnected && handle(this)) return; } catch (e) {}
+                return oc.apply(this, arguments);
+              };
+            } catch (e) {}
+          } catch (e) { /* never break the page */ }
+        })();
+    """.trimIndent()
+
     /**
      * JS that reads a blob:/data: URL inside the page and passes it to
      * WebToNative.saveBase64File. Never throws into the page.
@@ -2738,11 +2809,18 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun isNativeApp(): Boolean = true
 
+        /** Hidden log line explaining why a page-made file couldn't be saved. */
+        @JavascriptInterface
+        fun reportFileSaveIssue(reason: String?) {
+            try { Log.w("W2N_FILES", "page file save issue: ${reason ?: "unknown"}") } catch (_: Throwable) { }
+        }
+
         /** Saves a page-created file (base64) to Downloads. Never throws. */
         @JavascriptInterface
         fun saveBase64File(name: String?, mime: String?, base64: String?): Boolean {
             val ok = try {
-                if (base64.isNullOrEmpty() || base64.length > MAX_BRIDGE_FILE_B64) false
+                if (base64.isNullOrEmpty()) { Log.w("W2N_FILES", "save failed: empty data"); false }
+                else if (base64.length > MAX_BRIDGE_FILE_B64) { Log.w("W2N_FILES", "save failed: file too large"); false }
                 else saveBytesToDownloads(name, mime, android.util.Base64.decode(base64, android.util.Base64.DEFAULT))
             } catch (_: Throwable) { false }
             runOnUiThread {
