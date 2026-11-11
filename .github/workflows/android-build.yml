@@ -378,8 +378,8 @@ jobs:
 
           # One short install try: Ubuntu mirrors can be unreachable from GitHub runners.
           if ! command -v convert &> /dev/null; then
-            sudo timeout 25 apt-get update -qq -o Acquire::Retries=0 -o Acquire::http::Timeout=10 > /dev/null 2>&1 || true
-            sudo timeout 40 apt-get install -y -qq --no-install-recommends imagemagick > /dev/null 2>&1 || echo "ImageMagick install skipped"
+            sudo timeout 60 apt-get update -qq -o Acquire::Retries=0 -o Acquire::http::Timeout=10 > /dev/null 2>&1 || true
+            sudo timeout 120 apt-get install -y -qq --no-install-recommends imagemagick > /dev/null 2>&1 || echo "ImageMagick install skipped"
           fi
           HAVE_CONVERT="false"
           command -v convert &> /dev/null && HAVE_CONVERT="true"
