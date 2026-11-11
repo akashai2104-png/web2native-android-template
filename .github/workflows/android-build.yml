@@ -376,13 +376,10 @@ jobs:
           ICON_BG_COLOR="${ICON_BG_COLOR:-#1D4ED8}"
           CUSTOM_ICON_USED="false"
 
-          # Time-boxed install: Ubuntu mirrors can hang on GitHub runners.
+          # One short install try: Ubuntu mirrors can be unreachable from GitHub runners.
           if ! command -v convert &> /dev/null; then
-            for attempt in 1 2; do
-              sudo timeout 90 apt-get update -qq -o Acquire::Retries=1 -o Acquire::http::Timeout=20 > /dev/null 2>&1 || true
-              if sudo timeout 120 apt-get install -y -qq --no-install-recommends imagemagick > /dev/null 2>&1; then break; fi
-              echo "ImageMagick install attempt $attempt failed"
-            done
+            sudo timeout 25 apt-get update -qq -o Acquire::Retries=0 -o Acquire::http::Timeout=10 > /dev/null 2>&1 || true
+            sudo timeout 40 apt-get install -y -qq --no-install-recommends imagemagick > /dev/null 2>&1 || echo "ImageMagick install skipped"
           fi
           HAVE_CONVERT="false"
           command -v convert &> /dev/null && HAVE_CONVERT="true"
@@ -478,41 +475,62 @@ jobs:
           else
             echo "::warning::ImageMagick unavailable - generating icons with Python fallback"
             if [ -n "$ICON_URL" ]; then curl -fsSL --max-time 30 --retry 2 -o /tmp/icon_source "$ICON_URL" || rm -f /tmp/icon_source; fi
-            python3 -c "import PIL" 2>/dev/null || timeout 120 python3 -m pip install --quiet --user pillow > /dev/null 2>&1 || true
+            python3 -c "import PIL" 2>/dev/null || { timeout 60 python3 -m pip install --quiet --user --break-system-packages pillow > /dev/null 2>&1 || timeout 60 python3 -m pip install --quiet --user pillow > /dev/null 2>&1 || true; }
             ICON_BG_COLOR="$ICON_BG_COLOR" python3 - <<'PYEOF' || echo "::warning::Python icon fallback failed - keeping template icons"
           import os
-          from PIL import Image, ImageDraw
-          bg = os.environ.get("ICON_BG_COLOR", "#1D4ED8")
+          from PIL import Image, ImageDraw, ImageOps
+          bg = os.environ.get("ICON_BG_COLOR") or "#1D4ED8"
+          def hexrgb(h):
+              h = h.lstrip("#")[:6]
+              return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
           src = None
           try:
-              src = Image.open("/tmp/icon_source").convert("RGBA")
+              src = ImageOps.exif_transpose(Image.open("/tmp/icon_source")).convert("RGBA")
           except Exception:
               src = None
-          def legacy_base():
-              img = Image.new("RGBA", (1024, 1024), bg)
-              if src is not None:
-                  s = src.copy(); s.thumbnail((820, 820))
-                  img.paste(s, ((1024 - s.width) // 2, (1024 - s.height) // 2), s)
+          def ring(d, cx, cy, rx, ry, w):
+              h = w / 2
+              d.ellipse((cx-rx-h, cy-ry-h, cx+rx+h, cy+ry+h), outline="white", width=int(w))
+          def globe(img):
+              d = ImageDraw.Draw(img)
+              ring(d, 512, 512, 270, 270, 56)
+              ring(d, 512, 512, 150, 270, 40)
+              ring(d, 512, 512, 270, 118, 40)
+              ring(d, 512, 512, 270, 190, 28)
+              d.line((242, 512, 782, 512), fill="white", width=40)
+          if src is not None:
+              corner = src.crop((0, 0, 8, 8)).resize((1, 1), Image.BOX).getpixel((0, 0))
+              if corner[3] * 100 // 255 >= 50:
+                  bg = "#%02x%02x%02x" % corner[:3]
+                  trimmed = src
               else:
-                  d = ImageDraw.Draw(img); d.ellipse((242, 242, 782, 782), outline="white", width=56)
-              return img
-          def fg_base():
-              img = Image.new("RGBA", (1024, 1024), (0, 0, 0, 0))
-              if src is not None:
-                  s = src.copy(); s.thumbnail((700, 700))
-                  img.paste(s, ((1024 - s.width) // 2, (1024 - s.height) // 2), s)
-              else:
-                  d = ImageDraw.Draw(img); d.ellipse((242, 242, 782, 782), outline="white", width=56)
-              return img
-          L, F = legacy_base(), fg_base()
+                  box = src.getchannel("A").getbbox()
+                  trimmed = src.crop(box) if box else src
+              bgc = hexrgb(bg)
+              m = max(trimmed.size)
+              sq = Image.new("RGBA", (m, m), bgc + (255,))
+              sq.alpha_composite(trimmed, ((m - trimmed.width) // 2, (m - trimmed.height) // 2))
+              L = Image.new("RGBA", (1024, 1024), bgc + (255,))
+              L.alpha_composite(sq.resize((820, 820), Image.LANCZOS), (102, 102))
+              F = Image.new("RGBA", (1024, 1024), (0, 0, 0, 0))
+              F.alpha_composite(sq.resize((700, 700), Image.LANCZOS), (162, 162))
+          else:
+              bgc = hexrgb(bg)
+              L = Image.new("RGBA", (1024, 1024), bgc + (255,))
+              globe(L)
+              F = Image.new("RGBA", (1024, 1024), (0, 0, 0, 0)); globe(F)
           for density, size, fg in [("mdpi",48,108),("hdpi",72,162),("xhdpi",96,216),("xxhdpi",144,324),("xxxhdpi",192,432)]:
               out = f"app/src/main/res/mipmap-{density}"; os.makedirs(out, exist_ok=True)
               leg = L.resize((size, size), Image.LANCZOS); leg.save(f"{out}/ic_launcher.png")
               mask = Image.new("L", (size, size), 0); ImageDraw.Draw(mask).ellipse((0, 0, size - 1, size - 1), fill=255)
-              rnd = leg.copy(); rnd.putalpha(mask); rnd.save(f"{out}/ic_launcher_round.png")
+              rnd = Image.new("RGBA", (size, size), bgc + (255,)); rnd.alpha_composite(leg)
+              rnd.putalpha(mask); rnd.save(f"{out}/ic_launcher_round.png")
               F.resize((fg, fg), Image.LANCZOS).save(f"{out}/ic_launcher_foreground.png")
-          print("Python icon fallback complete")
+          with open("/tmp/icon_bg_color", "w") as fh:
+              fh.write(bg)
+          print("Python icon fallback complete bg=" + bg)
           PYEOF
+            [ -s /tmp/icon_bg_color ] && ICON_BG_COLOR="$(cat /tmp/icon_bg_color)"
           fi
 
           mkdir -p app/src/main/res/mipmap-anydpi-v26
